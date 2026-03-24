@@ -1,6 +1,0 @@
-app = "SketchDiary"
-primary_region = "fra"
-
-[mounts]
-  source = "bot_data"
-  destination = "/data"
