@@ -1,16 +1,15 @@
 """
 Single source of truth for inline callback IDs.
-Add all new callback_data constants here before wiring handlers in main.py.
+All new user features must start from inline callbacks to preserve Inline-First UX.
 """
 
 MENU_REGISTER = "menu_register"
 MENU_PROFILE = "menu_profile"
 MENU_GRADES = "menu_grades"
-MENU_HELP = "menu_help"
-MENU_ADMIN_HELP = "menu_admin_help"
+MENU_ADMIN_PANEL = "menu_admin_panel"
 MENU_ADMIN_REMOVE = "menu_admin_remove"
 MENU_REP_PANEL = "menu_rep_panel"
-MENU_REP_HELP = "menu_rep_help"
+MENU_REP_PENDING = "menu_rep_pending"
 MENU_REP_IMPORT_GRADES = "menu_rep_import_grades"
 MENU_REP_BROADCAST = "menu_rep_broadcast"
 MENU_REP_FORMS = "menu_rep_forms"
@@ -23,3 +22,5 @@ PREFIX_REP_FORM_VIEW = "rep_form_view:"
 PREFIX_REP_FORM_REFRESH = "rep_form_refresh:"
 PREFIX_JOIN_FORM_CONFIRM = "join_form_confirm:"
 PREFIX_JOIN_FORM_CANCEL = "join_form_cancel:"
+PREFIX_VERIFY_APPROVE = "verify_approve:"
+PREFIX_VERIFY_REJECT = "verify_reject:"

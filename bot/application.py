@@ -1,33 +1,36 @@
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
+    Defaults,
     MessageHandler,
     filters,
 )
 
 from app_callbacks import (
-    MENU_ADMIN_HELP,
+    MENU_ADMIN_PANEL,
     MENU_ADMIN_REMOVE,
     MENU_BACK,
     MENU_CANCEL,
     MENU_GRADES,
-    MENU_HELP,
     MENU_PROFILE,
     MENU_REGISTER,
     MENU_REP_BROADCAST,
     MENU_REP_FORMS,
     MENU_REP_FORM_CREATE,
     MENU_REP_FORM_LIST,
-    MENU_REP_HELP,
     MENU_REP_IMPORT_GRADES,
     MENU_REP_PANEL,
+    MENU_REP_PENDING,
     PREFIX_JOIN_FORM_CANCEL,
     PREFIX_JOIN_FORM_CONFIRM,
     PREFIX_REP_FORM_REFRESH,
     PREFIX_REP_FORM_VIEW,
+    PREFIX_VERIFY_APPROVE,
+    PREFIX_VERIFY_REJECT,
 )
 from bot.handlers import (
     back_to_menu,
@@ -39,24 +42,26 @@ from bot.handlers import (
     cancel,
     join_form_cancel,
     join_form_confirm,
-    menu_admin_help,
+    menu_admin_panel,
     menu_grades,
-    menu_help,
     menu_profile,
     menu_rep_form_list,
     menu_rep_form_refresh,
     menu_rep_form_view,
     menu_rep_forms,
-    menu_rep_help,
     menu_rep_panel,
+    menu_rep_pending,
     plain_text_router,
     receive_profile,
     receive_remove_student_number,
     receive_rep_broadcast_text,
     receive_rep_course_title,
+    receive_rep_form_deadline,
+    receive_rep_form_description,
     receive_rep_form_title,
     receive_rep_grade_list,
     receive_student_number,
+    review_verification_request,
     start,
     unknown_command,
 )
@@ -65,6 +70,8 @@ from bot.states import (
     WAITING_REMOVE_STUDENT_NUMBER,
     WAITING_REP_BROADCAST_TEXT,
     WAITING_REP_COURSE_TITLE,
+    WAITING_REP_FORM_DEADLINE,
+    WAITING_REP_FORM_DESCRIPTION,
     WAITING_REP_FORM_TITLE,
     WAITING_REP_GRADE_LIST,
     WAITING_STUDENT_NUMBER,
@@ -72,7 +79,8 @@ from bot.states import (
 
 
 def build_application(bot_token: str) -> Application:
-    app = ApplicationBuilder().token(bot_token).build()
+    defaults = Defaults(parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    app = ApplicationBuilder().token(bot_token).defaults(defaults).build()
 
     conversation = ConversationHandler(
         entry_points=[
@@ -105,6 +113,12 @@ def build_application(bot_token: str) -> Application:
             WAITING_REP_FORM_TITLE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rep_form_title)
             ],
+            WAITING_REP_FORM_DESCRIPTION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rep_form_description)
+            ],
+            WAITING_REP_FORM_DEADLINE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_rep_form_deadline)
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -118,10 +132,9 @@ def build_application(bot_token: str) -> Application:
     app.add_handler(CallbackQueryHandler(back_to_menu, pattern=f"^{MENU_BACK}$"))
     app.add_handler(CallbackQueryHandler(menu_profile, pattern=f"^{MENU_PROFILE}$"))
     app.add_handler(CallbackQueryHandler(menu_grades, pattern=f"^{MENU_GRADES}$"))
-    app.add_handler(CallbackQueryHandler(menu_help, pattern=f"^{MENU_HELP}$"))
-    app.add_handler(CallbackQueryHandler(menu_admin_help, pattern=f"^{MENU_ADMIN_HELP}$"))
+    app.add_handler(CallbackQueryHandler(menu_admin_panel, pattern=f"^{MENU_ADMIN_PANEL}$"))
     app.add_handler(CallbackQueryHandler(menu_rep_panel, pattern=f"^{MENU_REP_PANEL}$"))
-    app.add_handler(CallbackQueryHandler(menu_rep_help, pattern=f"^{MENU_REP_HELP}$"))
+    app.add_handler(CallbackQueryHandler(menu_rep_pending, pattern=f"^{MENU_REP_PENDING}$"))
     app.add_handler(CallbackQueryHandler(menu_rep_forms, pattern=f"^{MENU_REP_FORMS}$"))
     app.add_handler(CallbackQueryHandler(menu_rep_form_list, pattern=f"^{MENU_REP_FORM_LIST}$"))
     app.add_handler(CallbackQueryHandler(menu_rep_form_view, pattern=f"^{PREFIX_REP_FORM_VIEW}\\d+$"))
@@ -134,8 +147,10 @@ def build_application(bot_token: str) -> Application:
     app.add_handler(
         CallbackQueryHandler(join_form_cancel, pattern=f"^{PREFIX_JOIN_FORM_CANCEL}\\d+$")
     )
+    app.add_handler(
+        CallbackQueryHandler(review_verification_request, pattern=f"^({PREFIX_VERIFY_APPROVE}|{PREFIX_VERIFY_REJECT})\\d+$")
+    )
 
-    # Inline-first UX guard: keep free text only for active data-entry states.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, plain_text_router))
     app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
     return app

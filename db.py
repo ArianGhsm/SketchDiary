@@ -1,12 +1,19 @@
-import sqlite3
-import json
+from __future__ import annotations
+
 import csv
-from datetime import datetime
+import json
+import sqlite3
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
+from bot.services.datetime_fa import utc_now_iso
 from config import DB_PATH, DEFAULT_STUDENTS_CSV
 from text_utils import normalize_numeric_input
+
+
+PENDING_STATUS = "pending"
+APPROVED_STATUS = "approved"
+REJECTED_STATUS = "rejected"
 
 
 def get_connection() -> sqlite3.Connection:
@@ -33,8 +40,10 @@ def init_db() -> None:
                 telegram_user_id INTEGER PRIMARY KEY,
                 student_number TEXT NOT NULL,
                 full_name TEXT NOT NULL,
+                username TEXT,
                 profile_text TEXT NOT NULL,
-                registered_at TEXT NOT NULL,
+                approved_at TEXT NOT NULL,
+                approved_by_tg_id INTEGER,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 FOREIGN KEY(student_number) REFERENCES students(student_number)
             )
@@ -45,6 +54,30 @@ def init_db() -> None:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_active_student_number
             ON telegram_students(student_number)
             WHERE is_active = 1
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS verification_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_user_id INTEGER NOT NULL,
+                student_number TEXT NOT NULL,
+                full_name TEXT NOT NULL,
+                username TEXT,
+                profile_text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_at TEXT NOT NULL,
+                reviewed_at TEXT,
+                reviewed_by_tg_id INTEGER,
+                reviewer_note TEXT,
+                rep_message_refs_json TEXT NOT NULL DEFAULT '[]'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_verification_student_number
+            ON verification_requests(student_number, status)
             """
         )
         conn.execute(
@@ -62,6 +95,8 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS rep_forms (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                deadline_at TEXT,
                 created_by_tg_id INTEGER NOT NULL,
                 created_by_student_number TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -76,12 +111,45 @@ def init_db() -> None:
                 telegram_user_id INTEGER NOT NULL,
                 student_number TEXT NOT NULL,
                 full_name TEXT NOT NULL,
+                username TEXT,
                 joined_at TEXT NOT NULL,
                 PRIMARY KEY (form_id, telegram_user_id),
                 FOREIGN KEY(form_id) REFERENCES rep_forms(id)
             )
             """
         )
+
+        _ensure_column(conn, "telegram_students", "username", "TEXT")
+        _ensure_column(conn, "telegram_students", "approved_at", "TEXT")
+        _ensure_column(conn, "telegram_students", "approved_by_tg_id", "INTEGER")
+        _ensure_column(conn, "verification_requests", "username", "TEXT")
+        _ensure_column(conn, "verification_requests", "reviewer_note", "TEXT")
+        _ensure_column(conn, "verification_requests", "rep_message_refs_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "rep_forms", "description", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "rep_forms", "deadline_at", "TEXT")
+        _ensure_column(conn, "rep_form_entries", "username", "TEXT")
+
+        telegram_student_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(telegram_students)").fetchall()
+        }
+        if "registered_at" in telegram_student_columns:
+            conn.execute(
+                """
+                UPDATE telegram_students
+                SET approved_at = COALESCE(approved_at, registered_at)
+                WHERE approved_at IS NULL
+                """
+            )
+
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_sql: str) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")
 
 
 def _normalize_spaces(text: str) -> str:
@@ -119,10 +187,6 @@ def init_students_table() -> None:
 
 
 def ensure_students_seeded_from_default_csv() -> Dict[str, str | int]:
-    """
-    Seed students table from default CSV only when students table is empty.
-    This prevents 'student number not found' on fresh runs.
-    """
     with get_connection() as conn:
         count_row = conn.execute("SELECT COUNT(*) AS cnt FROM students").fetchone()
         if count_row and count_row["cnt"] > 0:
@@ -190,7 +254,7 @@ def get_active_registration_by_tg_id(telegram_user_id: int):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT telegram_user_id, student_number, full_name, profile_text, registered_at
+            SELECT telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id
             FROM telegram_students
             WHERE telegram_user_id = ? AND is_active = 1
             """,
@@ -202,7 +266,7 @@ def get_active_registration_by_student_number(student_number: str):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT telegram_user_id, student_number, full_name, profile_text, registered_at
+            SELECT telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id
             FROM telegram_students
             WHERE student_number = ? AND is_active = 1
             """,
@@ -210,13 +274,123 @@ def get_active_registration_by_student_number(student_number: str):
         ).fetchone()
 
 
+def list_recent_registrations(limit: int = 8):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT telegram_user_id, student_number, full_name, username, profile_text, approved_at
+            FROM telegram_students
+            WHERE is_active = 1
+            ORDER BY approved_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+
+def create_verification_request(
+    telegram_user_id: int,
+    student_number: str,
+    full_name: str,
+    username: str | None,
+    profile_text: str,
+) -> int:
+    now_iso = utc_now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE verification_requests
+            SET status = ?, reviewed_at = ?, reviewer_note = ?
+            WHERE telegram_user_id = ? AND status = ?
+            """,
+            ("superseded", now_iso, "new_request_created", telegram_user_id, PENDING_STATUS),
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO verification_requests (
+                telegram_user_id, student_number, full_name, username, profile_text, status, requested_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (telegram_user_id, student_number, full_name, username, profile_text, PENDING_STATUS, now_iso),
+        )
+    return int(cursor.lastrowid)
+
+
+def get_verification_request(request_id: int):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT id, telegram_user_id, student_number, full_name, username, profile_text, status,
+                   requested_at, reviewed_at, reviewed_by_tg_id, reviewer_note, rep_message_refs_json
+            FROM verification_requests
+            WHERE id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+
+
+def get_pending_request_by_user_id(telegram_user_id: int):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT id, telegram_user_id, student_number, full_name, username, profile_text, status,
+                   requested_at, reviewed_at, reviewed_by_tg_id, reviewer_note, rep_message_refs_json
+            FROM verification_requests
+            WHERE telegram_user_id = ? AND status = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (telegram_user_id, PENDING_STATUS),
+        ).fetchone()
+
+
+def list_pending_verification_requests(limit: int = 20):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT id, telegram_user_id, student_number, full_name, username, profile_text, requested_at
+            FROM verification_requests
+            WHERE status = ?
+            ORDER BY requested_at ASC
+            LIMIT ?
+            """,
+            (PENDING_STATUS, limit),
+        ).fetchall()
+
+
+def attach_rep_message_refs(request_id: int, refs: list[dict]) -> None:
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT rep_message_refs_json FROM verification_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+        existing = []
+        if row and row["rep_message_refs_json"]:
+            try:
+                existing = json.loads(row["rep_message_refs_json"])
+            except json.JSONDecodeError:
+                existing = []
+        existing.extend(refs)
+        conn.execute(
+            """
+            UPDATE verification_requests
+            SET rep_message_refs_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(existing, ensure_ascii=False), request_id),
+        )
+
+
 def upsert_registration(
     telegram_user_id: int,
     student_number: str,
     full_name: str,
+    username: str | None,
     profile_text: str,
+    approved_by_tg_id: int | None,
 ) -> None:
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = utc_now_iso()
     with get_connection() as conn:
         conn.execute(
             """
@@ -229,12 +403,99 @@ def upsert_registration(
         conn.execute(
             """
             INSERT INTO telegram_students (
-                telegram_user_id, student_number, full_name, profile_text, registered_at, is_active
+                telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id, is_active
             )
-            VALUES (?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1)
             """,
-            (telegram_user_id, student_number, full_name, profile_text, now_iso),
+            (telegram_user_id, student_number, full_name, username, profile_text, now_iso, approved_by_tg_id),
         )
+
+
+def decide_verification_request(
+    request_id: int,
+    reviewer_tg_id: int,
+    approve: bool,
+    reviewer_note: str | None = None,
+):
+    now_iso = utc_now_iso()
+    decision_status = APPROVED_STATUS if approve else REJECTED_STATUS
+    with get_connection() as conn:
+        request_row = conn.execute(
+            """
+            SELECT id, telegram_user_id, student_number, full_name, username, profile_text, status
+            FROM verification_requests
+            WHERE id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+        if not request_row:
+            return None, "not_found"
+        if request_row["status"] != PENDING_STATUS:
+            return request_row, "already_reviewed"
+
+        if approve:
+            active = conn.execute(
+                """
+                SELECT telegram_user_id
+                FROM telegram_students
+                WHERE student_number = ? AND is_active = 1
+                """,
+                (request_row["student_number"],),
+            ).fetchone()
+            if active and active["telegram_user_id"] != request_row["telegram_user_id"]:
+                conn.execute(
+                    """
+                    UPDATE verification_requests
+                    SET status = ?, reviewed_at = ?, reviewed_by_tg_id = ?, reviewer_note = ?
+                    WHERE id = ?
+                    """,
+                    (REJECTED_STATUS, now_iso, reviewer_tg_id, "student_number_already_linked", request_id),
+                )
+                updated = conn.execute(
+                    "SELECT * FROM verification_requests WHERE id = ?",
+                    (request_id,),
+                ).fetchone()
+                return updated, "student_number_already_linked"
+
+            conn.execute(
+                """
+                UPDATE telegram_students
+                SET is_active = 0
+                WHERE student_number = ? OR telegram_user_id = ?
+                """,
+                (request_row["student_number"], request_row["telegram_user_id"]),
+            )
+            conn.execute(
+                """
+                INSERT INTO telegram_students (
+                    telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id, is_active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    request_row["telegram_user_id"],
+                    request_row["student_number"],
+                    request_row["full_name"],
+                    request_row["username"],
+                    request_row["profile_text"],
+                    now_iso,
+                    reviewer_tg_id,
+                ),
+            )
+
+        conn.execute(
+            """
+            UPDATE verification_requests
+            SET status = ?, reviewed_at = ?, reviewed_by_tg_id = ?, reviewer_note = ?
+            WHERE id = ?
+            """,
+            (decision_status, now_iso, reviewer_tg_id, reviewer_note, request_id),
+        )
+        updated = conn.execute(
+            "SELECT * FROM verification_requests WHERE id = ?",
+            (request_id,),
+        ).fetchone()
+    return updated, decision_status
 
 
 def deactivate_student(student_number: str) -> int:
@@ -254,7 +515,6 @@ def upsert_students(students: Dict[str, str], replace_all: bool) -> int:
     with get_connection() as conn:
         if replace_all:
             conn.execute("DELETE FROM students")
-
         conn.executemany(
             """
             INSERT INTO students (student_number, full_name)
@@ -267,7 +527,7 @@ def upsert_students(students: Dict[str, str], replace_all: bool) -> int:
 
 
 def upsert_student_records(records: Dict[str, Dict], replace_all: bool) -> int:
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = utc_now_iso()
     with get_connection() as conn:
         if replace_all:
             conn.execute("DELETE FROM student_grades")
@@ -326,7 +586,7 @@ def list_students_with_grades():
 def bulk_upsert_course_grades(
     course_title: str, grade_entries: Iterable[Tuple[str, str]]
 ) -> Dict[str, List[str] | int]:
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = utc_now_iso()
     result = {
         "updated_count": 0,
         "missing_students": [],
@@ -374,26 +634,31 @@ def list_active_registered_users():
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT telegram_user_id, student_number, full_name
+            SELECT telegram_user_id, student_number, full_name, username, approved_at
             FROM telegram_students
             WHERE is_active = 1
+            ORDER BY approved_at ASC
             """
         ).fetchall()
 
 
 def create_rep_form(
     title: str,
+    description: str,
+    deadline_at: str | None,
     created_by_tg_id: int,
     created_by_student_number: str,
 ) -> int:
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = utc_now_iso()
     with get_connection() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO rep_forms (title, created_by_tg_id, created_by_student_number, created_at, is_active)
-            VALUES (?, ?, ?, ?, 1)
+            INSERT INTO rep_forms (
+                title, description, deadline_at, created_by_tg_id, created_by_student_number, created_at, is_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 1)
             """,
-            (title, created_by_tg_id, created_by_student_number, now_iso),
+            (title, description, deadline_at, created_by_tg_id, created_by_student_number, now_iso),
         )
     return int(cursor.lastrowid)
 
@@ -402,7 +667,7 @@ def get_rep_form_by_id(form_id: int):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT id, title, created_by_tg_id, created_by_student_number, created_at, is_active
+            SELECT id, title, description, deadline_at, created_by_tg_id, created_by_student_number, created_at, is_active
             FROM rep_forms
             WHERE id = ?
             """,
@@ -414,7 +679,7 @@ def list_rep_forms_by_creator(created_by_tg_id: int):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT id, title, created_at, is_active
+            SELECT id, title, description, deadline_at, created_at, is_active
             FROM rep_forms
             WHERE created_by_tg_id = ?
             ORDER BY id DESC
@@ -427,7 +692,7 @@ def get_rep_form_entry(form_id: int, telegram_user_id: int):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT form_id, telegram_user_id, student_number, full_name, joined_at
+            SELECT form_id, telegram_user_id, student_number, full_name, username, joined_at
             FROM rep_form_entries
             WHERE form_id = ? AND telegram_user_id = ?
             """,
@@ -440,6 +705,7 @@ def add_rep_form_entry(
     telegram_user_id: int,
     student_number: str,
     full_name: str,
+    username: str | None,
 ) -> str:
     form_row = get_rep_form_by_id(form_id)
     if not form_row or form_row["is_active"] != 1:
@@ -448,14 +714,14 @@ def add_rep_form_entry(
     if get_rep_form_entry(form_id, telegram_user_id):
         return "already_joined"
 
-    now_iso = datetime.utcnow().isoformat(timespec="seconds")
+    now_iso = utc_now_iso()
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO rep_form_entries (form_id, telegram_user_id, student_number, full_name, joined_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO rep_form_entries (form_id, telegram_user_id, student_number, full_name, username, joined_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (form_id, telegram_user_id, student_number, full_name, now_iso),
+            (form_id, telegram_user_id, student_number, full_name, username, now_iso),
         )
     return "joined"
 
@@ -464,7 +730,7 @@ def list_rep_form_entries(form_id: int):
     with get_connection() as conn:
         return conn.execute(
             """
-            SELECT form_id, telegram_user_id, student_number, full_name, joined_at
+            SELECT form_id, telegram_user_id, student_number, full_name, username, joined_at
             FROM rep_form_entries
             WHERE form_id = ?
             ORDER BY joined_at ASC

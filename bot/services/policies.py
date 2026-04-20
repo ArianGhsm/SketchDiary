@@ -54,3 +54,14 @@ def is_verified_representative(user_id: int) -> bool:
     registered = get_active_registration_by_tg_id(user_id)
     rep_student_number = normalize_student_number(MAIN_REP_STUDENT_NUMBER)
     return bool(registered and registered["student_number"] == rep_student_number)
+
+
+def verification_reviewer_ids() -> list[int]:
+    reviewer_ids = []
+    rep_id = to_int_id(MAIN_REP_TELEGRAM_ID)
+    if rep_id is not None:
+        reviewer_ids.append(rep_id)
+    for admin_id in sorted(normalized_admin_ids()):
+        if admin_id not in reviewer_ids:
+            reviewer_ids.append(admin_id)
+    return reviewer_ids
