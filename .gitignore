@@ -5,11 +5,7 @@ __pycache__/
 *.db
 *.sqlite
 *.sqlite3
-logs/
-uploads/
-data/
 .idea/
 .vscode/
-data/students.db
 *.sqlite3
 *.db-journal

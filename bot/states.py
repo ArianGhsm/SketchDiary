@@ -1,0 +1,10 @@
+# Conversation states used for text-entry steps in inline-first flows.
+(
+    WAITING_STUDENT_NUMBER,
+    WAITING_PROFILE,
+    WAITING_REMOVE_STUDENT_NUMBER,
+    WAITING_REP_COURSE_TITLE,
+    WAITING_REP_GRADE_LIST,
+    WAITING_REP_BROADCAST_TEXT,
+    WAITING_REP_FORM_TITLE,
+) = range(7)

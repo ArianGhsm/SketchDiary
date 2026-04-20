@@ -1,10 +1,12 @@
 import sqlite3
 import json
+import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
-from config import DB_PATH
+from config import DB_PATH, DEFAULT_STUDENTS_CSV
+from text_utils import normalize_numeric_input
 
 
 def get_connection() -> sqlite3.Connection:
@@ -82,6 +84,18 @@ def init_db() -> None:
         )
 
 
+def _normalize_spaces(text: str) -> str:
+    return " ".join(str(text).strip().split())
+
+
+def _compose_full_name(row: dict, name_col: str | None, first_col: str | None, last_col: str | None) -> str:
+    if name_col:
+        return _normalize_spaces(row.get(name_col, ""))
+    first_name = _normalize_spaces(row.get(first_col or "", ""))
+    last_name = _normalize_spaces(row.get(last_col or "", ""))
+    return _normalize_spaces(f"{first_name} {last_name}")
+
+
 def init_students_table() -> None:
     with get_connection() as conn:
         conn.execute(
@@ -102,6 +116,66 @@ def init_students_table() -> None:
             )
             """
         )
+
+
+def ensure_students_seeded_from_default_csv() -> Dict[str, str | int]:
+    """
+    Seed students table from default CSV only when students table is empty.
+    This prevents 'student number not found' on fresh runs.
+    """
+    with get_connection() as conn:
+        count_row = conn.execute("SELECT COUNT(*) AS cnt FROM students").fetchone()
+        if count_row and count_row["cnt"] > 0:
+            return {"status": "skipped", "reason": "students_table_not_empty", "count": count_row["cnt"]}
+
+    csv_path = Path(DEFAULT_STUDENTS_CSV)
+    if not csv_path.exists():
+        return {"status": "skipped", "reason": "default_csv_not_found", "count": 0}
+
+    records: Dict[str, Dict[str, str]] = {}
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+        if not reader.fieldnames:
+            return {"status": "skipped", "reason": "csv_header_not_found", "count": 0}
+
+        header_map = {h.strip().lower(): h for h in reader.fieldnames if h}
+        student_id_col = header_map.get("studentid")
+        name_col = header_map.get("name")
+        first_name_col = header_map.get("firstname")
+        last_name_col = header_map.get("lastname")
+
+        if not student_id_col:
+            return {"status": "skipped", "reason": "studentid_column_missing", "count": 0}
+        if not name_col and not (first_name_col and last_name_col):
+            return {"status": "skipped", "reason": "name_columns_missing", "count": 0}
+
+        for row in reader:
+            student_id = normalize_numeric_input(row.get(student_id_col, ""))
+            full_name = _compose_full_name(row, name_col, first_name_col, last_name_col)
+            if not student_id or not full_name:
+                continue
+
+            grade_fields = {}
+            for col in reader.fieldnames:
+                if not col:
+                    continue
+                normalized_col = col.strip().lower()
+                if normalized_col in {"studentid", "name", "firstname", "lastname", "password"}:
+                    continue
+                value = _normalize_spaces(row.get(col, ""))
+                if value:
+                    grade_fields[col.strip()] = value
+
+            records[student_id] = {
+                "full_name": full_name,
+                "grades_json": json.dumps(grade_fields, ensure_ascii=False),
+            }
+
+    if not records:
+        return {"status": "skipped", "reason": "no_valid_rows", "count": 0}
+
+    inserted = upsert_student_records(records, replace_all=False)
+    return {"status": "seeded", "reason": "ok", "count": inserted}
 
 
 def find_student(student_number: str):

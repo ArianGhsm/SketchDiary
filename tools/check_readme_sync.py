@@ -111,6 +111,7 @@ def local_module_names(repo_root: Path) -> set[str]:
     names: set[str] = set()
     for py_file in repo_root.rglob("*.py"):
         if py_file.name == "__init__.py":
+            names.add(py_file.parent.name)
             continue
         names.add(py_file.stem)
     return names
@@ -153,7 +154,7 @@ def dependency_sync_check(repo_root: Path, changed: list[str]) -> tuple[bool, st
         "Missing mappings:",
     ]
     for module, requirement in missing_requirements:
-        lines.append(f"- import '{module}' نیازمند requirement '{requirement}'")
+        lines.append(f"- import '{module}' requires requirement '{requirement}'")
     lines.append("Please update requirements.txt in the same commit.")
     return False, "\n".join(lines)
 

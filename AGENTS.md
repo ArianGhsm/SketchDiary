@@ -9,6 +9,7 @@ This repository is **Inline-First Telegram UX**.
 3. Keep text input only for data-entry steps.
 4. Always keep inline back/cancel/home actions in user flows.
 5. Keep operational data under `data/` and do not scatter DB files.
+6. Enforce Auth-First: do not expose full user capabilities before verification.
 
 ## Documentation Update Rule (Hard Requirement)
 
