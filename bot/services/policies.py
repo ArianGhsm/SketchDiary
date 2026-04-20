@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from config import ADMIN_IDS, MAIN_REP_STUDENT_NUMBER, MAIN_REP_TELEGRAM_ID
-from db import get_active_registration_by_tg_id
+from db import get_active_registration_by_tg_id, list_representatives
 from text_utils import normalize_numeric_input
 
 
@@ -28,11 +28,17 @@ def normalized_admin_ids() -> set[int]:
         parsed = to_int_id(raw_id)
         if parsed is not None:
             normalized.add(parsed)
-
     rep_id = to_int_id(MAIN_REP_TELEGRAM_ID)
     if rep_id is not None:
         normalized.add(rep_id)
     return normalized
+
+
+def representative_user_ids() -> set[int]:
+    ids = set()
+    for row in list_representatives():
+        ids.add(int(row["telegram_user_id"]))
+    return ids
 
 
 def is_admin(user_id: int) -> bool:
@@ -40,8 +46,7 @@ def is_admin(user_id: int) -> bool:
 
 
 def is_rep_candidate(user_id: int) -> bool:
-    rep_id = to_int_id(MAIN_REP_TELEGRAM_ID)
-    return rep_id is not None and user_id == rep_id
+    return user_id in representative_user_ids()
 
 
 def is_verified_user(user_id: int) -> bool:
@@ -52,16 +57,8 @@ def is_verified_representative(user_id: int) -> bool:
     if not is_rep_candidate(user_id):
         return False
     registered = get_active_registration_by_tg_id(user_id)
-    rep_student_number = normalize_student_number(MAIN_REP_STUDENT_NUMBER)
-    return bool(registered and registered["student_number"] == rep_student_number)
+    return bool(registered)
 
 
 def verification_reviewer_ids() -> list[int]:
-    reviewer_ids = []
-    rep_id = to_int_id(MAIN_REP_TELEGRAM_ID)
-    if rep_id is not None:
-        reviewer_ids.append(rep_id)
-    for admin_id in sorted(normalized_admin_ids()):
-        if admin_id not in reviewer_ids:
-            reviewer_ids.append(admin_id)
-    return reviewer_ids
+    return sorted(representative_user_ids() | normalized_admin_ids())

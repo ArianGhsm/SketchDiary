@@ -1,6 +1,6 @@
 # راهنمای مشارکت
 
-## قانون اصلی
+## قانون طلایی
 
 هر تغییر کد باید همراه با تغییر مستندات تحویل شود.
 
@@ -12,10 +12,10 @@
 
 - `ARCHITECTURE_FA.md`
 - `INLINE_UX_POLICY_FA.md`
-- `data/README.md`
 - `bot/README.md`
+- `data/README.md`
 
-اگر وابستگی یا import جدید اضافه شد:
+اگر dependency عوض شد:
 
 - `requirements.txt`
 
@@ -23,47 +23,24 @@
 
 یک تغییر زمانی کامل است که:
 
-1. پروژه compile شود.
-2. قرارداد Inline-First حفظ شده باشد.
-3. قرارداد Auth-First شکسته نشده باشد.
-4. متن‌ها و کیبوردها با استاندارد UI فعلی هماهنگ باشند.
-5. README همگام با رفتار جدید پروژه باشد.
+1. compile یا اجرای پایه را پاس کند.
+2. Inline-First را حفظ کند.
+3. Auth-First را نشکند.
+4. داده‌های عملیاتی را بیرون از `data/` پخش نکند.
+5. README با رفتار واقعی پروژه sync باشد.
 
-## استاندارد کدنویسی در این مخزن
+## قواعد توسعه
 
-- callbackهای جدید را در `app_callbacks.py` ثبت کنید.
-- متن‌ها را در `bot/ui/texts.py` نگه دارید.
-- کیبوردها را در `bot/ui/keyboards.py` اضافه کنید.
-- helperهای مشترک را در `bot/services/` قرار دهید.
-- برای تاریخ و زمان فقط از `bot/services/datetime_fa.py` استفاده کنید.
-- داده‌های قابل‌کپی را با monospace نمایش دهید.
+- callbackها را در `app_callbacks.py` نگه دارید.
+- متن‌ها را در `bot/ui/texts.py` متمرکز کنید.
+- کیبوردها را در `bot/ui/keyboards.py` نگه دارید.
+- helper مشترک را در `bot/services/` بگذارید.
+- زمان را فقط از `datetime_fa.py` رندر کنید.
+- خروجی‌ها را از `exporters.py` عبور دهید.
 
-## قوانین UX
-
-- دکمه‌ها معنی‌دار باشند.
-- مسیر مخفی یا command-only نسازید.
-- راهنمای عمومی بلند به منوی اصلی اضافه نکنید.
-- destructive action بدون مسیر برگشت یا هشدار نسازید.
-
-## هوک محلی
-
-برای فعال‌سازی pre-commit hook:
+## قبل از تحویل
 
 ```bash
 git config core.hooksPath .githooks
+python tools/check_readme_sync.py
 ```
-
-اسکریپت بررسی:
-
-```text
-tools/check_readme_sync.py
-```
-
-## پیشنهاد فرایند توسعه
-
-1. ساختار فعلی را بخوانید.
-2. callback و state لازم را تعریف کنید.
-3. handler را اضافه یا اصلاح کنید.
-4. متن و کیبورد را یکدست کنید.
-5. README و اسناد وابسته را آپدیت کنید.
-6. یک دور compile یا اجرای محلی بگیرید.
