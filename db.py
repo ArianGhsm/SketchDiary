@@ -194,6 +194,13 @@ def init_db() -> None:
             """
         )
 
+        _ensure_column(conn, "telegram_students", "username", "TEXT")
+        _ensure_column(conn, "telegram_students", "approved_at", "TEXT")
+        _ensure_column(conn, "telegram_students", "approved_by_tg_id", "INTEGER")
+        _ensure_column(conn, "telegram_students", "is_active", "INTEGER NOT NULL DEFAULT 1")
+        _ensure_column(conn, "verification_requests", "username", "TEXT")
+        _ensure_column(conn, "verification_requests", "reviewer_note", "TEXT")
+        _ensure_column(conn, "verification_requests", "rep_message_refs_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "forms", "share_token", "TEXT")
         _ensure_column(conn, "forms", "description", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "forms", "status", "TEXT NOT NULL DEFAULT 'draft'")
@@ -217,6 +224,31 @@ def init_db() -> None:
         for row in conn.execute("SELECT id, share_token FROM forms").fetchall():
             if not row["share_token"]:
                 conn.execute("UPDATE forms SET share_token = ? WHERE id = ?", (_generate_share_token(), row["id"]))
+
+        telegram_student_columns = {row["name"] for row in conn.execute("PRAGMA table_info(telegram_students)").fetchall()}
+        if "registered_at" in telegram_student_columns:
+            conn.execute(
+                """
+                UPDATE telegram_students
+                SET approved_at = COALESCE(approved_at, registered_at)
+                WHERE approved_at IS NULL OR approved_at = ''
+                """
+            )
+        conn.execute(
+            """
+            UPDATE telegram_students
+            SET approved_at = COALESCE(NULLIF(approved_at, ''), ?)
+            WHERE approved_at IS NULL OR approved_at = ''
+            """,
+            (utc_now_iso(),),
+        )
+        conn.execute(
+            """
+            UPDATE verification_requests
+            SET rep_message_refs_json = '[]'
+            WHERE rep_message_refs_json IS NULL OR rep_message_refs_json = ''
+            """
+        )
 
     ensure_default_representative()
 

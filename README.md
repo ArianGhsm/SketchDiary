@@ -239,6 +239,10 @@ data/default_students.csv
 python import_students.py --replace-all
 ```
 
+نکته:
+
+- در startup، migration سبک برای دیتابیس‌های قدیمی هم انجام می‌شود تا ستون‌های جدید مثل `username` و `approved_at` به schema قبلی اضافه شوند.
+
 ### 4. اجرای ربات
 
 ```bash
