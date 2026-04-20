@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatType
@@ -169,7 +169,7 @@ def _parse_user_datetime(raw_text: str) -> str | None:
     for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M"):
         try:
             tehran_dt = datetime.strptime(text, fmt).replace(tzinfo=TEHRAN_TZ)
-            return tehran_dt.astimezone(UTC).isoformat(timespec="seconds")
+            return tehran_dt.astimezone(timezone.utc).isoformat(timespec="seconds")
         except ValueError:
             continue
     return None
