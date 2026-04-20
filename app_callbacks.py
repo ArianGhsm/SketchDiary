@@ -1,0 +1,25 @@
+"""
+Single source of truth for inline callback IDs.
+Add all new callback_data constants here before wiring handlers in main.py.
+"""
+
+MENU_REGISTER = "menu_register"
+MENU_PROFILE = "menu_profile"
+MENU_GRADES = "menu_grades"
+MENU_HELP = "menu_help"
+MENU_ADMIN_HELP = "menu_admin_help"
+MENU_ADMIN_REMOVE = "menu_admin_remove"
+MENU_REP_PANEL = "menu_rep_panel"
+MENU_REP_HELP = "menu_rep_help"
+MENU_REP_IMPORT_GRADES = "menu_rep_import_grades"
+MENU_REP_BROADCAST = "menu_rep_broadcast"
+MENU_REP_FORMS = "menu_rep_forms"
+MENU_REP_FORM_CREATE = "menu_rep_form_create"
+MENU_REP_FORM_LIST = "menu_rep_form_list"
+MENU_BACK = "menu_back"
+MENU_CANCEL = "menu_cancel"
+
+PREFIX_REP_FORM_VIEW = "rep_form_view:"
+PREFIX_REP_FORM_REFRESH = "rep_form_refresh:"
+PREFIX_JOIN_FORM_CONFIRM = "join_form_confirm:"
+PREFIX_JOIN_FORM_CANCEL = "join_form_cancel:"
