@@ -40,6 +40,7 @@ class FormAdminStates(StatesGroup):
 
 class AdminStates(StatesGroup):
     waiting_remove_student = State()
+    waiting_student_search = State()
 
 
 class ScheduleStates(StatesGroup):

@@ -116,7 +116,8 @@ data/bot.polling.lock
 قواعد این لایه:
 
 - button semantics یکدست
-- استفاده از `style="success" / "danger" / "primary"`
+- استفاده از `style="success"` و `style="danger"` فقط برای اکشن‌های برجسته
+- نگه‌داشتن دکمه‌های خنثی در حالت پیش‌فرض و بی‌رنگ
 - دکمه‌های `copy_text` برای موارد مناسب
 - back/cancel/home در flowها
 

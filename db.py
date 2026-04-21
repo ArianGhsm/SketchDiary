@@ -602,9 +602,9 @@ def count_registered_students(query: str | None = None) -> int:
     sql = "SELECT COUNT(*) AS cnt FROM telegram_students WHERE is_active = 1"
     params: list = []
     if query:
-        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ?)"
+        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ? OR CAST(telegram_user_id AS TEXT) LIKE ?)"
         like = f"%{query}%"
-        params.extend([like, like, like])
+        params.extend([like, like, like, like])
     with get_connection() as conn:
         row = conn.execute(sql, tuple(params)).fetchone()
     return int(row["cnt"]) if row else 0
@@ -629,9 +629,9 @@ def list_registered_students(
     """
     params: list = []
     if query:
-        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ?)"
+        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ? OR CAST(telegram_user_id AS TEXT) LIKE ?)"
         like = f"%{query}%"
-        params.extend([like, like, like])
+        params.extend([like, like, like, like])
     sql += f" ORDER BY {sort_map.get(sort_by, 'approved_at DESC')} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with get_connection() as conn:
@@ -650,6 +650,32 @@ def list_recent_registrations(limit: int = 10):
             """,
             (limit,),
         ).fetchall()
+
+
+def list_recent_channel_ids(limit: int = 6) -> list[int]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            """
+            WITH channels AS (
+                SELECT channel_id AS channel_id, MAX(created_at) AS last_used
+                FROM form_schedules
+                WHERE channel_id IS NOT NULL
+                GROUP BY channel_id
+                UNION ALL
+                SELECT announcement_channel_id AS channel_id, MAX(created_at) AS last_used
+                FROM forms
+                WHERE announcement_channel_id IS NOT NULL AND announcement_channel_id != ''
+                GROUP BY announcement_channel_id
+            )
+            SELECT channel_id
+            FROM channels
+            GROUP BY channel_id
+            ORDER BY MAX(last_used) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [int(row["channel_id"]) for row in rows]
 
 
 def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: bool, reviewer_note: str | None = None):
@@ -683,23 +709,47 @@ def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: b
                 "UPDATE telegram_students SET is_active = 0 WHERE student_number = ? OR telegram_user_id = ?",
                 (request_row["student_number"], request_row["telegram_user_id"]),
             )
-            conn.execute(
-                """
-                INSERT INTO telegram_students (
-                    telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id, is_active
+            telegram_student_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(telegram_students)").fetchall()
+            }
+            if "registered_at" in telegram_student_columns:
+                conn.execute(
+                    """
+                    INSERT INTO telegram_students (
+                        telegram_user_id, student_number, full_name, username, profile_text,
+                        registered_at, approved_at, approved_by_tg_id, is_active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        request_row["telegram_user_id"],
+                        request_row["student_number"],
+                        request_row["full_name"],
+                        request_row["username"],
+                        request_row["profile_text"],
+                        now_iso,
+                        now_iso,
+                        reviewer_tg_id,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-                """,
-                (
-                    request_row["telegram_user_id"],
-                    request_row["student_number"],
-                    request_row["full_name"],
-                    request_row["username"],
-                    request_row["profile_text"],
-                    now_iso,
-                    reviewer_tg_id,
-                ),
-            )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO telegram_students (
+                        telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id, is_active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        request_row["telegram_user_id"],
+                        request_row["student_number"],
+                        request_row["full_name"],
+                        request_row["username"],
+                        request_row["profile_text"],
+                        now_iso,
+                        reviewer_tg_id,
+                    ),
+                )
 
         conn.execute(
             """
@@ -989,9 +1039,25 @@ def list_form_submissions(
         sql += " AND status = ?"
         params.append(status)
     if query:
-        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ?)"
+        sql += """
+            AND (
+                student_number LIKE ?
+                OR full_name LIKE ?
+                OR COALESCE(username, '') LIKE ?
+                OR CAST(telegram_user_id AS TEXT) LIKE ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM submission_answers a
+                    WHERE a.submission_id = form_submissions.id
+                      AND (
+                          COALESCE(a.answer_text, '') LIKE ?
+                          OR COALESCE(a.answer_json, '') LIKE ?
+                      )
+                )
+            )
+        """
         like = f"%{query}%"
-        params.extend([like, like, like])
+        params.extend([like, like, like, like, like, like])
     sql += f" ORDER BY {sort_map.get(sort_by, 'registration_order ASC')}"
     with get_connection() as conn:
         return conn.execute(sql, tuple(params)).fetchall()

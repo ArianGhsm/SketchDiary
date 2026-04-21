@@ -32,6 +32,8 @@ from app_callbacks import (
     PREFIX_ADMIN_REMOVE_CANCEL,
     PREFIX_ADMIN_REMOVE_CONFIRM,
     PREFIX_ADMIN_REMOVE_SELECT,
+    PREFIX_ADMIN_STUDENT_SEARCH,
+    PREFIX_ADMIN_STUDENT_SORT,
     PREFIX_CHECKBOX_DONE,
     PREFIX_CHECKBOX_TOGGLE,
     PREFIX_CHOICE_PICK,
@@ -50,6 +52,7 @@ from app_callbacks import (
     PREFIX_QUESTION_TYPE,
     PREFIX_REQUIRED,
     PREFIX_SCHEDULE_CANCEL,
+    PREFIX_SCHEDULE_CHANNEL_PICK,
     PREFIX_SCHEDULE_DEACTIVATE,
     PREFIX_SCHEDULE_FORM,
     PREFIX_SCHEDULE_VIEW,
@@ -105,6 +108,7 @@ from bot.ui.keyboards import (
     rep_panel_markup,
     required_markup,
     schedule_detail_markup,
+    schedule_channel_picker_markup,
     schedule_list_markup,
     schedule_recurring_markup,
     simple_back_home_markup,
@@ -168,6 +172,7 @@ from db import (
     list_open_forms,
     list_pending_verification_requests,
     list_registered_students,
+    list_recent_channel_ids,
     list_recent_registrations,
     list_students_with_grades,
     manual_add_submission,
@@ -258,15 +263,28 @@ async def _show_schedule_page(callback: CallbackQuery, page: int) -> None:
     )
 
 
-async def _show_admin_students_page(callback: CallbackQuery, page: int) -> None:
-    total = count_registered_students()
+async def _build_admin_students_view(state: FSMContext, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    data = await state.get_data()
+    query = (data.get("admin_student_query") or "").strip() or None
+    sort_by = data.get("admin_student_sort_by") or "approved_at_desc"
+    total = count_registered_students(query=query)
     pages = max(1, (total + ADMIN_STUDENTS_PAGE_SIZE - 1) // ADMIN_STUDENTS_PAGE_SIZE)
     page = max(1, min(page, pages))
-    rows = list_registered_students(limit=ADMIN_STUDENTS_PAGE_SIZE, offset=(page - 1) * ADMIN_STUDENTS_PAGE_SIZE)
-    await callback.message.edit_text(
-        registered_students_text(rows, page, pages, total),
-        reply_markup=admin_student_list_markup(rows, page, pages),
+    rows = list_registered_students(
+        limit=ADMIN_STUDENTS_PAGE_SIZE,
+        offset=(page - 1) * ADMIN_STUDENTS_PAGE_SIZE,
+        query=query,
+        sort_by=sort_by,
     )
+    return (
+        registered_students_text(rows, page, pages, total, query=query, sort_by=sort_by),
+        admin_student_list_markup(rows, page, pages, query=query, sort_by=sort_by),
+    )
+
+
+async def _show_admin_students_page(callback: CallbackQuery, state: FSMContext, page: int) -> None:
+    text, markup = await _build_admin_students_view(state, page)
+    await callback.message.edit_text(text, reply_markup=markup)
 
 
 async def _finalize_verification_messages(bot: Bot, request_row, decision_text: str) -> None:
@@ -499,7 +517,7 @@ async def publish_scheduled_form(bot: Bot, scheduler, schedule_id: int) -> None:
     reply_rows = []
     if link:
         reply_rows.append([InlineKeyboardButton(text="📌 ثبت‌نام در فرم", url=link, style="success")])
-        reply_rows.append([InlineKeyboardButton(text="📋 کپی لینک", copy_text=CopyTextButton(text=link), style="primary")])
+        reply_rows.append([InlineKeyboardButton(text="📋 کپی لینک", copy_text=CopyTextButton(text=link))])
     await bot.send_message(
         chat_id=schedule["channel_id"],
         text=(
@@ -783,7 +801,7 @@ async def menu_rep_pending(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith(f"{PREFIX_PAGE}"))
-async def paginate(callback: CallbackQuery) -> None:
+async def paginate(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     payload = callback.data[len(PREFIX_PAGE):]
     section, page_raw = payload.split(":")
@@ -801,7 +819,7 @@ async def paginate(callback: CallbackQuery) -> None:
         await _show_schedule_page(callback, page)
         return
     if section == "admin_students":
-        await _show_admin_students_page(callback, page)
+        await _show_admin_students_page(callback, state, page)
 
 
 @router.callback_query(F.data == MENU_REP_FORMS)
@@ -1390,7 +1408,31 @@ async def begin_schedule(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(ScheduleStates.waiting_channel_id)
     await state.update_data(schedule_form_id=form_id)
-    await callback.message.answer("📢 شناسه کانال را بفرست. مثال: `-1001234567890`", reply_markup=cancel_markup())
+    recent_channels = list_recent_channel_ids()
+    await callback.message.answer(
+        "📢 کانال انتشار را انتخاب کن. اگر کانال در این فهرست نیست، از دکمه‌ی ورود دستی استفاده کن و شناسه را بفرست.",
+        reply_markup=schedule_channel_picker_markup(recent_channels),
+    )
+
+
+@router.callback_query(ScheduleStates.waiting_channel_id, F.data.startswith(PREFIX_SCHEDULE_CHANNEL_PICK))
+async def schedule_channel_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    selected = callback.data[len(PREFIX_SCHEDULE_CHANNEL_PICK):]
+    if selected == "manual":
+        await callback.message.edit_text("📢 شناسه کانال را بفرست. مثال: `-1001234567890`", reply_markup=cancel_markup())
+        return
+    channel_id = int(selected)
+    await state.update_data(channel_id=channel_id)
+    await state.set_state(ScheduleStates.waiting_post_at)
+    await callback.message.edit_text(f"📣 کانال انتخاب شد: {code(channel_id)}", reply_markup=None)
+    await _begin_date_picker(
+        callback.message,
+        state,
+        target="schedule_post_at",
+        label="زمان انتشار",
+        allow_none=False,
+    )
 
 
 @router.message(ScheduleStates.waiting_channel_id)
@@ -1488,14 +1530,54 @@ async def menu_admin_panel(callback: CallbackQuery) -> None:
 async def begin_admin_remove(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    await _show_admin_students_page(callback, page=1)
+    await _show_admin_students_page(callback, state, page=1)
 
 
 @router.callback_query(F.data == MENU_ADMIN_REMOVE)
 async def admin_remove_from_list(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    await _show_admin_students_page(callback, page=1)
+    await _show_admin_students_page(callback, state, page=1)
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_STUDENT_SEARCH))
+async def admin_student_search_action(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    action = callback.data[len(PREFIX_ADMIN_STUDENT_SEARCH):]
+    current_data = await state.get_data()
+    sort_by = current_data.get("admin_student_sort_by") or "approved_at_desc"
+    if action == "clear":
+        await state.clear()
+        await state.update_data(admin_student_sort_by=sort_by)
+        await _show_admin_students_page(callback, state, page=1)
+        return
+    await state.set_state(AdminStates.waiting_student_search)
+    await callback.message.answer(
+        "🔎 عبارت جستجو را بفرست. نام، شماره دانشجویی، آیدی عددی تلگرام، یوزرنیم و پاسخ‌های فرم‌ها در جستجو پوشش داده می‌شوند.",
+        reply_markup=cancel_markup(),
+    )
+
+
+@router.message(AdminStates.waiting_student_search, F.text)
+async def admin_student_search_submit(message: Message, state: FSMContext) -> None:
+    query = (message.text or "").strip()
+    current_data = await state.get_data()
+    sort_by = current_data.get("admin_student_sort_by") or "approved_at_desc"
+    await state.clear()
+    await state.update_data(admin_student_query=query or None, admin_student_sort_by=sort_by)
+    text, markup = await _build_admin_students_view(state, page=1)
+    await message.answer(text, reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_STUDENT_SORT))
+async def admin_student_sort_action(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    sort_by = callback.data[len(PREFIX_ADMIN_STUDENT_SORT):]
+    current_data = await state.get_data()
+    query = current_data.get("admin_student_query")
+    await state.clear()
+    await state.update_data(admin_student_query=query, admin_student_sort_by=sort_by)
+    await _show_admin_students_page(callback, state, page=1)
 
 
 @router.callback_query(F.data == MENU_ADMIN_REMOVE_DIRECT)
@@ -1526,7 +1608,7 @@ async def admin_remove_select(callback: CallbackQuery) -> None:
 async def admin_remove_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("حذف لغو شد.")
     await state.clear()
-    await _show_admin_students_page(callback, page=1)
+    await _show_admin_students_page(callback, state, page=1)
 
 
 @router.callback_query(F.data.startswith(PREFIX_ADMIN_REMOVE_CONFIRM))

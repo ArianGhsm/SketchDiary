@@ -12,6 +12,16 @@ def _username_text(username: str | None) -> str:
     return code(f"@{username}") if username else code("ندارد")
 
 
+def _registered_sort_label(sort_by: str) -> str:
+    labels = {
+        "approved_at_desc": "جدیدترین تایید",
+        "approved_at_asc": "قدیمی‌ترین تایید",
+        "student_number": "شماره دانشجویی",
+        "name": "نام دانشجو",
+    }
+    return labels.get(sort_by, "جدیدترین تایید")
+
+
 def home_text(verified: bool) -> str:
     if verified:
         return (
@@ -270,9 +280,24 @@ def admin_panel_text(recent_rows: Iterable, total_students: int) -> str:
     return "🛠 <b>پنل مدیریت</b>\n\n" + "\n".join(lines)
 
 
-def registered_students_text(rows: Iterable, page: int, total_pages: int, total_students: int) -> str:
+def registered_students_text(
+    rows: Iterable,
+    page: int,
+    total_pages: int,
+    total_students: int,
+    *,
+    query: str | None = None,
+    sort_by: str = "approved_at_desc",
+) -> str:
     rows = list(rows)
-    lines = [f"👥 <b>دانشجوهای تاییدشده</b> — صفحه {code(page)} از {code(total_pages)}", f"مجموع فعال: {code(total_students)}", ""]
+    lines = [
+        f"👥 <b>دانشجوهای تاییدشده</b> — صفحه {code(page)} از {code(total_pages)}",
+        f"مجموع فعال: {code(total_students)}",
+        f"↕️ مرتب‌سازی: {code(_registered_sort_label(sort_by))}",
+    ]
+    if query:
+        lines.append(f"🔎 جستجو: {code(query)}")
+    lines.append("")
     if not rows:
         lines.append("دانشجوی فعالی برای نمایش وجود ندارد.")
         return "\n".join(lines)

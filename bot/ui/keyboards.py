@@ -25,6 +25,8 @@ from app_callbacks import (
     PREFIX_ADMIN_REMOVE_CANCEL,
     PREFIX_ADMIN_REMOVE_CONFIRM,
     PREFIX_ADMIN_REMOVE_SELECT,
+    PREFIX_ADMIN_STUDENT_SEARCH,
+    PREFIX_ADMIN_STUDENT_SORT,
     PREFIX_CHECKBOX_DONE,
     PREFIX_CHECKBOX_TOGGLE,
     PREFIX_CHOICE_PICK,
@@ -43,6 +45,7 @@ from app_callbacks import (
     PREFIX_QUESTION_TYPE,
     PREFIX_REQUIRED,
     PREFIX_SCHEDULE_CANCEL,
+    PREFIX_SCHEDULE_CHANNEL_PICK,
     PREFIX_SCHEDULE_DEACTIVATE,
     PREFIX_SCHEDULE_FORM,
     PREFIX_SCHEDULE_VIEW,
@@ -61,7 +64,9 @@ def _button(
     copy_text_value: str | None = None,
     kind: str = "primary",
 ) -> InlineKeyboardButton:
-    payload = {"text": text, "style": kind}
+    payload = {"text": text}
+    if kind in {"success", "danger"}:
+        payload["style"] = kind
     if callback_data is not None:
         payload["callback_data"] = callback_data
     elif url is not None:
@@ -288,6 +293,15 @@ def schedule_recurring_markup() -> InlineKeyboardMarkup:
     )
 
 
+def schedule_channel_picker_markup(channel_ids: list[int]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for channel_id in channel_ids[:6]:
+        kb.row(_button(f"📣 {channel_id}", callback_data=f"{PREFIX_SCHEDULE_CHANNEL_PICK}{channel_id}"))
+    kb.row(_button("⌨️ واردکردن شناسه دیگر", callback_data=f"{PREFIX_SCHEDULE_CHANNEL_PICK}manual"))
+    kb.row(_button("❌ لغو", callback_data=MENU_CANCEL, kind="danger"))
+    return kb.as_markup()
+
+
 def schedule_list_markup(rows, page: int, total_pages: int) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for row in rows:
@@ -312,7 +326,14 @@ def schedule_detail_markup(schedule_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def admin_student_list_markup(rows, page: int, total_pages: int) -> InlineKeyboardMarkup:
+def admin_student_list_markup(
+    rows,
+    page: int,
+    total_pages: int,
+    *,
+    query: str | None = None,
+    sort_by: str = "approved_at_desc",
+) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     for row in rows:
         kb.row(
@@ -322,6 +343,33 @@ def admin_student_list_markup(rows, page: int, total_pages: int) -> InlineKeyboa
                 kind="danger",
             )
         )
+    kb.row(_button("🔎 جستجو", callback_data=f"{PREFIX_ADMIN_STUDENT_SEARCH}prompt"))
+    if query:
+        kb.row(_button("🧹 پاک‌کردن جستجو", callback_data=f"{PREFIX_ADMIN_STUDENT_SEARCH}clear", kind="danger"))
+    kb.row(
+        _button(
+            "🕒 جدیدترین",
+            callback_data=f"{PREFIX_ADMIN_STUDENT_SORT}approved_at_desc",
+            kind="success" if sort_by == "approved_at_desc" else "primary",
+        ),
+        _button(
+            "🕰 قدیمی‌ترین",
+            callback_data=f"{PREFIX_ADMIN_STUDENT_SORT}approved_at_asc",
+            kind="success" if sort_by == "approved_at_asc" else "primary",
+        ),
+    )
+    kb.row(
+        _button(
+            "🎓 شماره",
+            callback_data=f"{PREFIX_ADMIN_STUDENT_SORT}student_number",
+            kind="success" if sort_by == "student_number" else "primary",
+        ),
+        _button(
+            "👤 نام",
+            callback_data=f"{PREFIX_ADMIN_STUDENT_SORT}name",
+            kind="success" if sort_by == "name" else "primary",
+        ),
+    )
     nav = []
     if total_pages > 1 and page > 1:
         nav.append(_button("◀️ قبلی", callback_data=f"{PREFIX_PAGE}admin_students:{page - 1}"))
