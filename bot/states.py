@@ -36,11 +36,13 @@ class FormAdminStates(StatesGroup):
     waiting_manual_add_student = State()
     waiting_manual_remove_student = State()
     waiting_search_query = State()
+    waiting_channel_id = State()
 
 
 class AdminStates(StatesGroup):
     waiting_remove_student = State()
     waiting_student_search = State()
+    waiting_channel_id = State()
 
 
 class ScheduleStates(StatesGroup):

@@ -12,6 +12,26 @@ def _username_text(username: str | None) -> str:
     return code(f"@{username}") if username else code("ندارد")
 
 
+def _form_kind_label(form_kind: str | None) -> str:
+    labels = {
+        "custom": "سفارشی",
+        "quick_list": "سریع / جمع‌آوری لیست",
+    }
+    return labels.get(form_kind or "custom", "سفارشی")
+
+
+def _channel_kind_label(channel_kind: str | None) -> str:
+    labels = {
+        "class": "اطلاع‌رسانی",
+        "notes": "جزوه‌نویسی",
+    }
+    return labels.get(channel_kind or "class", "اطلاع‌رسانی")
+
+
+def _channel_value(channel_id) -> str:
+    return code(channel_id) if channel_id else code("تنظیم نشده")
+
+
 def _registered_sort_label(sort_by: str) -> str:
     labels = {
         "approved_at_desc": "جدیدترین تایید",
@@ -38,9 +58,9 @@ def verification_intro_text() -> str:
     return info_card(
         "🔐 احراز هویت دانشجو",
         [
-            "در این مرحله فقط شماره دانشجویی و یک معرفی کوتاه از شما گرفته می‌شود.",
-            "درخواست برای نماینده‌ها ارسال می‌شود و بعد از تایید، حساب تلگرام به شماره دانشجویی متصل خواهد شد.",
-            "تا قبل از تایید، دسترسی کامل دانشجویی فعال نمی‌شود.",
+            "در این مرحله فقط شماره دانشجویی و یک معرفی کوتاه لازم است.",
+            "ابتدا شماره دانشجویی را بفرست تا اطلاعاتت پیدا شود.",
+            "بعد از تایید نماینده، حساب تلگرام به شماره دانشجویی متصل می‌شود و امکانات دانشجویی فعال خواهد شد.",
         ],
     )
 
@@ -157,9 +177,11 @@ def form_summary_text(form_row, stats: dict, questions: list, share_link: str | 
             [
                 labeled_row("🗂", "عنوان", e(form_row["title"])),
                 labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
+                labeled_row("🧭", "نوع فرم", code(_form_kind_label(form_row["form_kind"]))),
                 labeled_row("📦", "ظرفیت", code(form_row["capacity"] or "نامحدود")),
                 labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
                 labeled_row("🪪", "Waitlist", code("فعال" if form_row["waitlist_enabled"] else "غیرفعال")),
+                labeled_row("📣", "کانال انتشار", _channel_value(form_row["announcement_channel_id"])),
                 render_telegram_time(form_row["created_at"], "زمان ساخت"),
                 *build_deadline_lines(form_row["deadline_at"]),
             ],
@@ -203,15 +225,19 @@ def submissions_text(form_row, submissions: list, title: str = "ثبت‌نام�
 
 
 def form_join_text(form_row, questions: list) -> str:
+    lines = [
+        labeled_row("🗂", "عنوان", e(form_row["title"])),
+        labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
+        labeled_row("🧭", "نوع فرم", code(_form_kind_label(form_row["form_kind"]))),
+        labeled_row("❓", "تعداد سوال", code(len(questions))),
+        labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
+        *build_deadline_lines(form_row["deadline_at"]),
+    ]
+    if (form_row["form_kind"] or "custom") == "quick_list":
+        lines.append("با تایید این مرحله، نام و شماره دانشجویی شما بدون سوال اضافه در لیست ثبت می‌شود.")
     return info_card(
         "🗂 فرم آماده پاسخ‌گویی است",
-        [
-            labeled_row("🗂", "عنوان", e(form_row["title"])),
-            labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
-            labeled_row("❓", "تعداد سوال", code(len(questions))),
-            labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
-            *build_deadline_lines(form_row["deadline_at"]),
-        ],
+        lines,
     )
 
 
@@ -240,6 +266,7 @@ def schedule_list_text(rows: Iterable, page: int, total_pages: int) -> str:
                 [
                     labeled_row("🆔", "شناسه", code(row["id"])),
                     labeled_row("📣", "کانال", code(row["channel_id"])),
+                    labeled_row("🏷", "نوع کانال", code(_channel_kind_label(row["channel_kind"]))),
                     labeled_row("🔁", "تکرار", code(row["recurring_rule"] or "فقط یک‌بار")),
                     labeled_row("🚦", "وضعیت", code("فعال" if row["is_active"] else "غیرفعال")),
                     render_telegram_time(row["post_at"], "زمان انتشار"),
@@ -257,12 +284,61 @@ def schedule_detail_text(schedule_row, template_form) -> str:
             labeled_row("🆔", "شناسه", code(schedule_row["id"])),
             labeled_row("🗂", "فرم الگو", e(template_form["title"]) if template_form else code(schedule_row["template_form_id"])),
             labeled_row("📣", "کانال", code(schedule_row["channel_id"])),
+            labeled_row("🏷", "نوع کانال", code(_channel_kind_label(schedule_row["channel_kind"]))),
             labeled_row("🔁", "تکرار", code(schedule_row["recurring_rule"] or "فقط یک‌بار")),
             labeled_row("🚦", "وضعیت", code("فعال" if schedule_row["is_active"] else "غیرفعال")),
             render_telegram_time(schedule_row["post_at"], "انتشار بعدی"),
             *build_deadline_lines(schedule_row["registration_deadline_at"]),
             render_telegram_time(schedule_row["last_run_at"], "آخرین اجرا") if schedule_row["last_run_at"] else "",
         ],
+    )
+
+
+def form_channel_settings_text(form_row, available_channels: list[tuple[str, int]]) -> str:
+    lines = [
+        labeled_row("🗂", "فرم", e(form_row["title"])),
+        labeled_row("📣", "کانال انتخاب‌شده", _channel_value(form_row["announcement_channel_id"])),
+    ]
+    if available_channels:
+        lines.append("<b>کانال‌های سراسری ذخیره‌شده</b>")
+        for channel_kind, channel_id in available_channels:
+            lines.append(f"• {_channel_kind_label(channel_kind)} — {code(channel_id)}")
+    else:
+        lines.append("هنوز کانال سراسری ثبت نشده است.")
+    return (
+        info_card(
+            "📣 انتخاب کانال انتشار فرم",
+            lines,
+        )
+        + "\n\nبرای هر فرم فقط مقصد انتشار را از بین کانال‌های سراسری انتخاب کن."
+    )
+
+
+def bot_channels_settings_text(channels: dict[str, int | None]) -> str:
+    return (
+        info_card(
+            "📡 کانال‌های سراسری ربات",
+            [
+                labeled_row("📣", "اطلاع‌رسانی", _channel_value(channels.get("class"))),
+                labeled_row("📝", "جزوه", _channel_value(channels.get("notes"))),
+            ],
+        )
+        + "\n\nاین کانال‌ها یک‌بار برای کل ربات ذخیره می‌شوند و فرم‌ها فقط مقصد خود را از بین همین‌ها انتخاب می‌کنند."
+    )
+
+
+def form_delete_confirmation_text(form_row) -> str:
+    return (
+        info_card(
+            "🗑 تایید حذف کامل فرم",
+            [
+                labeled_row("🗂", "عنوان", e(form_row["title"])),
+                labeled_row("🧭", "نوع فرم", code(_form_kind_label(form_row["form_kind"]))),
+                labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
+                render_telegram_time(form_row["created_at"], "زمان ساخت"),
+            ],
+        )
+        + "\n\n⚠️ با حذف فرم، سوال‌ها، پاسخ‌ها و زمان‌بندی‌های وابسته هم حذف می‌شوند."
     )
 
 

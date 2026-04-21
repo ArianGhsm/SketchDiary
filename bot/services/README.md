@@ -29,6 +29,11 @@
 - خروجی `XLSX`
 - خروجی `JSON`
 
+### `backup.py`
+
+- snapshot امن از دیتابیس SQLite
+- ساخت فایل ZIP برای ارسال بکاپ در تلگرام
+
 ### `formatting.py`
 
 - escape

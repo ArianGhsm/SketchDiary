@@ -18,6 +18,11 @@ REJECTED_STATUS = "rejected"
 FORM_STATUS_DRAFT = "draft"
 FORM_STATUS_OPEN = "open"
 FORM_STATUS_CLOSED = "closed"
+FORM_KIND_CUSTOM = "custom"
+FORM_KIND_QUICK_LIST = "quick_list"
+
+CHANNEL_KIND_CLASS = "class"
+CHANNEL_KIND_NOTES = "notes"
 
 SUBMISSION_STATUS_SUBMITTED = "submitted"
 SUBMISSION_STATUS_WAITLIST = "waitlist"
@@ -36,6 +41,14 @@ def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_sql
     columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if column not in columns:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")
+
+
+def _bot_channel_setting_key(channel_kind: str) -> str:
+    if channel_kind == CHANNEL_KIND_CLASS:
+        return "global_class_channel_id"
+    if channel_kind == CHANNEL_KIND_NOTES:
+        return "global_notes_channel_id"
+    raise ValueError("invalid_channel_kind")
 
 
 def init_db() -> None:
@@ -117,6 +130,7 @@ def init_db() -> None:
                 title TEXT NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
                 share_token TEXT UNIQUE NOT NULL,
+                form_kind TEXT NOT NULL DEFAULT 'custom',
                 status TEXT NOT NULL DEFAULT 'draft',
                 deadline_at TEXT,
                 capacity INTEGER,
@@ -126,6 +140,8 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 closed_at TEXT,
                 announcement_channel_id INTEGER,
+                class_channel_id INTEGER,
+                notes_channel_id INTEGER,
                 source_form_id INTEGER
             )
             """
@@ -182,6 +198,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 template_form_id INTEGER NOT NULL,
                 channel_id INTEGER NOT NULL,
+                channel_kind TEXT NOT NULL DEFAULT 'class',
                 post_at TEXT NOT NULL,
                 registration_deadline_at TEXT,
                 recurring_rule TEXT,
@@ -190,6 +207,15 @@ def init_db() -> None:
                 created_by_tg_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(template_form_id) REFERENCES forms(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value_text TEXT,
+                updated_at TEXT NOT NULL
             )
             """
         )
@@ -202,6 +228,7 @@ def init_db() -> None:
         _ensure_column(conn, "verification_requests", "reviewer_note", "TEXT")
         _ensure_column(conn, "verification_requests", "rep_message_refs_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "forms", "share_token", "TEXT")
+        _ensure_column(conn, "forms", "form_kind", "TEXT NOT NULL DEFAULT 'custom'")
         _ensure_column(conn, "forms", "description", "TEXT NOT NULL DEFAULT ''")
         _ensure_column(conn, "forms", "status", "TEXT NOT NULL DEFAULT 'draft'")
         _ensure_column(conn, "forms", "deadline_at", "TEXT")
@@ -209,6 +236,8 @@ def init_db() -> None:
         _ensure_column(conn, "forms", "waitlist_enabled", "INTEGER NOT NULL DEFAULT 0")
         _ensure_column(conn, "forms", "closed_at", "TEXT")
         _ensure_column(conn, "forms", "announcement_channel_id", "INTEGER")
+        _ensure_column(conn, "forms", "class_channel_id", "INTEGER")
+        _ensure_column(conn, "forms", "notes_channel_id", "INTEGER")
         _ensure_column(conn, "forms", "source_form_id", "INTEGER")
         _ensure_column(conn, "form_questions", "options_json", "TEXT NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "form_questions", "settings_json", "TEXT NOT NULL DEFAULT '{}'")
@@ -217,6 +246,7 @@ def init_db() -> None:
         _ensure_column(conn, "form_submissions", "updated_at", "TEXT")
         _ensure_column(conn, "submission_answers", "answer_text", "TEXT")
         _ensure_column(conn, "submission_answers", "answer_json", "TEXT NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "form_schedules", "channel_kind", "TEXT NOT NULL DEFAULT 'class'")
         _ensure_column(conn, "form_schedules", "registration_deadline_at", "TEXT")
         _ensure_column(conn, "form_schedules", "recurring_rule", "TEXT")
         _ensure_column(conn, "form_schedules", "last_run_at", "TEXT")
@@ -248,6 +278,29 @@ def init_db() -> None:
             SET rep_message_refs_json = '[]'
             WHERE rep_message_refs_json IS NULL OR rep_message_refs_json = ''
             """
+        )
+        conn.execute(
+            """
+            UPDATE forms
+            SET form_kind = COALESCE(NULLIF(form_kind, ''), ?)
+            WHERE form_kind IS NULL OR form_kind = ''
+            """,
+            (FORM_KIND_CUSTOM,),
+        )
+        conn.execute(
+            """
+            UPDATE forms
+            SET class_channel_id = announcement_channel_id
+            WHERE class_channel_id IS NULL AND announcement_channel_id IS NOT NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE form_schedules
+            SET channel_kind = COALESCE(NULLIF(channel_kind, ''), ?)
+            WHERE channel_kind IS NULL OR channel_kind = ''
+            """,
+            (CHANNEL_KIND_CLASS,),
         )
 
     ensure_default_representative()
@@ -652,30 +705,89 @@ def list_recent_registrations(limit: int = 10):
         ).fetchall()
 
 
-def list_recent_channel_ids(limit: int = 6) -> list[int]:
+def list_recent_channel_ids(limit: int = 6, channel_kind: str = CHANNEL_KIND_CLASS) -> list[int]:
+    with get_connection() as conn:
+        if channel_kind == CHANNEL_KIND_NOTES:
+            rows = conn.execute(
+                """
+                SELECT notes_channel_id AS channel_id
+                FROM forms
+                WHERE notes_channel_id IS NOT NULL
+                GROUP BY notes_channel_id
+                ORDER BY MAX(created_at) DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                WITH channels AS (
+                    SELECT channel_id AS channel_id, MAX(created_at) AS last_used
+                    FROM form_schedules
+                    WHERE channel_id IS NOT NULL AND channel_kind = ?
+                    GROUP BY channel_id
+                    UNION ALL
+                    SELECT COALESCE(class_channel_id, announcement_channel_id) AS channel_id, MAX(created_at) AS last_used
+                    FROM forms
+                    WHERE COALESCE(class_channel_id, announcement_channel_id) IS NOT NULL
+                    GROUP BY COALESCE(class_channel_id, announcement_channel_id)
+                )
+                SELECT channel_id
+                FROM channels
+                GROUP BY channel_id
+                ORDER BY MAX(last_used) DESC
+                LIMIT ?
+                """,
+                (channel_kind, limit),
+            ).fetchall()
+    return [int(row["channel_id"]) for row in rows]
+
+
+def get_bot_channels() -> dict[str, int | None]:
+    result = {
+        CHANNEL_KIND_CLASS: None,
+        CHANNEL_KIND_NOTES: None,
+    }
+    keys = {
+        _bot_channel_setting_key(CHANNEL_KIND_CLASS): CHANNEL_KIND_CLASS,
+        _bot_channel_setting_key(CHANNEL_KIND_NOTES): CHANNEL_KIND_NOTES,
+    }
     with get_connection() as conn:
         rows = conn.execute(
-            """
-            WITH channels AS (
-                SELECT channel_id AS channel_id, MAX(created_at) AS last_used
-                FROM form_schedules
-                WHERE channel_id IS NOT NULL
-                GROUP BY channel_id
-                UNION ALL
-                SELECT announcement_channel_id AS channel_id, MAX(created_at) AS last_used
-                FROM forms
-                WHERE announcement_channel_id IS NOT NULL AND announcement_channel_id != ''
-                GROUP BY announcement_channel_id
-            )
-            SELECT channel_id
-            FROM channels
-            GROUP BY channel_id
-            ORDER BY MAX(last_used) DESC
-            LIMIT ?
-            """,
-            (limit,),
+            "SELECT key, value_text FROM bot_settings WHERE key IN (?, ?)",
+            tuple(keys.keys()),
         ).fetchall()
-    return [int(row["channel_id"]) for row in rows]
+    for row in rows:
+        channel_kind = keys.get(row["key"])
+        if channel_kind and row["value_text"]:
+            result[channel_kind] = int(row["value_text"])
+    return result
+
+
+def list_configured_bot_channels() -> list[tuple[str, int]]:
+    channels = get_bot_channels()
+    configured: list[tuple[str, int]] = []
+    for channel_kind in (CHANNEL_KIND_CLASS, CHANNEL_KIND_NOTES):
+        channel_id = channels.get(channel_kind)
+        if channel_id is not None:
+            configured.append((channel_kind, int(channel_id)))
+    return configured
+
+
+def set_bot_channel(channel_kind: str, channel_id: int) -> None:
+    setting_key = _bot_channel_setting_key(channel_kind)
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO bot_settings (key, value_text, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_text = excluded.value_text,
+                updated_at = excluded.updated_at
+            """,
+            (setting_key, str(channel_id), utc_now_iso()),
+        )
 
 
 def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: bool, reviewer_note: str | None = None):
@@ -706,7 +818,7 @@ def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: b
                 return updated, "student_number_already_linked"
 
             conn.execute(
-                "UPDATE telegram_students SET is_active = 0 WHERE student_number = ? OR telegram_user_id = ?",
+                "UPDATE telegram_students SET is_active = 0 WHERE student_number = ? AND telegram_user_id != ?",
                 (request_row["student_number"], request_row["telegram_user_id"]),
             )
             telegram_student_columns = {
@@ -720,6 +832,15 @@ def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: b
                         registered_at, approved_at, approved_by_tg_id, is_active
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(telegram_user_id) DO UPDATE SET
+                        student_number = excluded.student_number,
+                        full_name = excluded.full_name,
+                        username = excluded.username,
+                        profile_text = excluded.profile_text,
+                        registered_at = COALESCE(telegram_students.registered_at, excluded.registered_at),
+                        approved_at = excluded.approved_at,
+                        approved_by_tg_id = excluded.approved_by_tg_id,
+                        is_active = 1
                     """,
                     (
                         request_row["telegram_user_id"],
@@ -739,6 +860,14 @@ def decide_verification_request(request_id: int, reviewer_tg_id: int, approve: b
                         telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id, is_active
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(telegram_user_id) DO UPDATE SET
+                        student_number = excluded.student_number,
+                        full_name = excluded.full_name,
+                        username = excluded.username,
+                        profile_text = excluded.profile_text,
+                        approved_at = excluded.approved_at,
+                        approved_by_tg_id = excluded.approved_by_tg_id,
+                        is_active = 1
                     """,
                     (
                         request_row["telegram_user_id"],
@@ -785,6 +914,9 @@ def create_form(
     created_by_tg_id: int,
     created_by_student_number: str,
     questions: Sequence[dict],
+    form_kind: str = FORM_KIND_CUSTOM,
+    class_channel_id: int | None = None,
+    notes_channel_id: int | None = None,
     status: str = FORM_STATUS_OPEN,
     source_form_id: int | None = None,
 ) -> int:
@@ -793,15 +925,17 @@ def create_form(
         cursor = conn.execute(
             """
             INSERT INTO forms (
-                title, description, share_token, status, deadline_at, capacity, waitlist_enabled,
-                created_by_tg_id, created_by_student_number, created_at, source_form_id
+                title, description, share_token, form_kind, status, deadline_at, capacity, waitlist_enabled,
+                created_by_tg_id, created_by_student_number, created_at, announcement_channel_id,
+                class_channel_id, notes_channel_id, source_form_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 title,
                 description,
                 _generate_share_token(),
+                form_kind,
                 status,
                 deadline_at,
                 capacity,
@@ -809,6 +943,9 @@ def create_form(
                 created_by_tg_id,
                 created_by_student_number,
                 now_iso,
+                class_channel_id,
+                class_channel_id,
+                notes_channel_id,
                 source_form_id,
             ),
         )
@@ -879,6 +1016,24 @@ def update_form_announcement_channel(form_id: int, channel_id: int) -> None:
         conn.execute("UPDATE forms SET announcement_channel_id = ? WHERE id = ?", (channel_id, form_id))
 
 
+def update_form_channel(form_id: int, channel_kind: str, channel_id: int) -> None:
+    column_map = {
+        CHANNEL_KIND_CLASS: "class_channel_id",
+        CHANNEL_KIND_NOTES: "notes_channel_id",
+    }
+    column_name = column_map.get(channel_kind)
+    if not column_name:
+        raise ValueError("invalid_channel_kind")
+    with get_connection() as conn:
+        if channel_kind == CHANNEL_KIND_CLASS:
+            conn.execute(
+                f"UPDATE forms SET {column_name} = ?, announcement_channel_id = ? WHERE id = ?",
+                (channel_id, channel_id, form_id),
+            )
+        else:
+            conn.execute(f"UPDATE forms SET {column_name} = ? WHERE id = ?", (channel_id, form_id))
+
+
 def close_form(form_id: int) -> None:
     with get_connection() as conn:
         conn.execute(
@@ -916,6 +1071,9 @@ def duplicate_form(form_id: int, created_by_tg_id: int, created_by_student_numbe
         created_by_tg_id=created_by_tg_id,
         created_by_student_number=created_by_student_number,
         questions=questions,
+        form_kind=form["form_kind"] or FORM_KIND_CUSTOM,
+        class_channel_id=form["class_channel_id"] or form["announcement_channel_id"],
+        notes_channel_id=form["notes_channel_id"],
         status=FORM_STATUS_DRAFT,
         source_form_id=form_id,
     )
@@ -1169,17 +1327,27 @@ def create_form_schedule(
     registration_deadline_at: str | None,
     recurring_rule: str | None,
     created_by_tg_id: int,
+    channel_kind: str = CHANNEL_KIND_CLASS,
 ) -> int:
     with get_connection() as conn:
         cursor = conn.execute(
             """
             INSERT INTO form_schedules (
-                template_form_id, channel_id, post_at, registration_deadline_at, recurring_rule,
-                is_active, created_by_tg_id, created_at
+                template_form_id, channel_id, channel_kind, post_at, registration_deadline_at,
+                recurring_rule, is_active, created_by_tg_id, created_at
             )
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)
             """,
-            (template_form_id, channel_id, post_at, registration_deadline_at, recurring_rule, created_by_tg_id, utc_now_iso()),
+            (
+                template_form_id,
+                channel_id,
+                channel_kind,
+                post_at,
+                registration_deadline_at,
+                recurring_rule,
+                created_by_tg_id,
+                utc_now_iso(),
+            ),
         )
     return int(cursor.lastrowid)
 
@@ -1205,6 +1373,19 @@ def get_schedule(schedule_id: int):
 def deactivate_schedule(schedule_id: int) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE form_schedules SET is_active = 0 WHERE id = ?", (schedule_id,))
+
+
+def delete_form(form_id: int) -> int:
+    with get_connection() as conn:
+        conn.execute(
+            "DELETE FROM submission_answers WHERE submission_id IN (SELECT id FROM form_submissions WHERE form_id = ?)",
+            (form_id,),
+        )
+        conn.execute("DELETE FROM form_submissions WHERE form_id = ?", (form_id,))
+        conn.execute("DELETE FROM form_questions WHERE form_id = ?", (form_id,))
+        conn.execute("DELETE FROM form_schedules WHERE template_form_id = ?", (form_id,))
+        result = conn.execute("DELETE FROM forms WHERE id = ?", (form_id,))
+    return int(result.rowcount)
 
 
 def mark_schedule_run(schedule_id: int, next_post_at: str | None = None) -> None:

@@ -4,13 +4,14 @@ import json
 from datetime import datetime, timezone
 
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiogram.types import BufferedInputFile, CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app_callbacks import (
+    MENU_ADMIN_BACKUP,
+    MENU_ADMIN_CHANNELS,
     MENU_ADMIN_PANEL,
     MENU_ADMIN_REMOVE,
     MENU_ADMIN_REMOVE_DIRECT,
@@ -23,12 +24,15 @@ from app_callbacks import (
     MENU_REP_BROADCAST,
     MENU_REP_FORMS,
     MENU_REP_FORM_CREATE,
+    MENU_REP_FORM_CREATE_QUICK,
     MENU_REP_FORM_LIST,
     MENU_REP_IMPORT_GRADES,
     MENU_REP_PANEL,
     MENU_REP_PENDING,
     MENU_REP_SCHEDULES,
     PREFIX_ADD_ANOTHER_QUESTION,
+    PREFIX_ADMIN_CHANNEL_PICK,
+    PREFIX_ADMIN_CHANNEL_SET,
     PREFIX_ADMIN_REMOVE_CANCEL,
     PREFIX_ADMIN_REMOVE_CONFIRM,
     PREFIX_ADMIN_REMOVE_SELECT,
@@ -39,6 +43,10 @@ from app_callbacks import (
     PREFIX_CHOICE_PICK,
     PREFIX_DATE_PICKER,
     PREFIX_FORM_CLOSE,
+    PREFIX_FORM_CHANNELS,
+    PREFIX_FORM_CHANNEL_PICK,
+    PREFIX_FORM_DELETE,
+    PREFIX_FORM_DELETE_CONFIRM,
     PREFIX_FORM_DUPLICATE,
     PREFIX_FORM_EXPORT,
     PREFIX_FORM_JOIN,
@@ -59,9 +67,10 @@ from app_callbacks import (
     PREFIX_VERIFY_APPROVE,
     PREFIX_VERIFY_REJECT,
 )
+from bot.services.backup import build_database_backup_zip
 from bot.services.date_picker import clamp_day, default_picker_state, jalali_selection_to_utc_iso, now_jalali, shift_month
 from assistant_profile import PROFILE
-from bot.services.datetime_fa import TEHRAN_TZ, format_datetime_fa, parse_db_datetime, render_telegram_time, utc_now
+from bot.services.datetime_fa import TEHRAN_TZ, format_datetime_fa, render_telegram_time
 from bot.services.exporters import (
     build_csv_bytes,
     build_json_bytes,
@@ -92,6 +101,8 @@ from bot.states import (
 )
 from bot.ui.keyboards import (
     add_another_question_markup,
+    admin_channel_picker_markup,
+    admin_channel_settings_markup,
     admin_panel_markup,
     admin_remove_confirmation_markup,
     admin_student_list_markup,
@@ -99,6 +110,8 @@ from bot.ui.keyboards import (
     checkbox_markup,
     date_picker_markup,
     form_detail_markup,
+    form_channel_settings_markup,
+    form_delete_confirmation_markup,
     form_join_markup,
     form_list_markup,
     forms_menu_markup,
@@ -108,7 +121,6 @@ from bot.ui.keyboards import (
     rep_panel_markup,
     required_markup,
     schedule_detail_markup,
-    schedule_channel_picker_markup,
     schedule_list_markup,
     schedule_recurring_markup,
     simple_back_home_markup,
@@ -119,7 +131,10 @@ from bot.ui.texts import (
     admin_panel_text,
     admin_remove_confirmation_text,
     ask_question_text,
+    bot_channels_settings_text,
     date_picker_text,
+    form_channel_settings_text,
+    form_delete_confirmation_text,
     form_join_text,
     form_summary_text,
     grades_text,
@@ -135,6 +150,10 @@ from bot.ui.texts import (
     verification_request_message,
 )
 from db import (
+    CHANNEL_KIND_CLASS,
+    CHANNEL_KIND_NOTES,
+    FORM_KIND_CUSTOM,
+    FORM_KIND_QUICK_LIST,
     FORM_STATUS_CLOSED,
     FORM_STATUS_DRAFT,
     FORM_STATUS_OPEN,
@@ -142,17 +161,18 @@ from db import (
     bulk_upsert_course_grades,
     close_form,
     count_registered_students,
-    count_active_form_submissions,
     create_form,
     create_form_schedule,
     create_verification_request,
     decide_verification_request,
     deactivate_schedule,
     deactivate_student,
+    delete_form,
     duplicate_form,
     find_student,
     get_active_registration_by_student_number,
     get_active_registration_by_tg_id,
+    get_bot_channels,
     get_form_by_id,
     get_form_by_share_token,
     get_form_statistics,
@@ -161,15 +181,14 @@ from db import (
     get_pending_request_by_user_id,
     get_schedule,
     get_student_grades,
-    get_submission_answers,
     get_verification_request,
     list_active_registered_users,
     list_form_questions,
     list_form_schedules,
     list_form_submissions,
     list_forms_by_creator,
+    list_configured_bot_channels,
     list_non_submitters,
-    list_open_forms,
     list_pending_verification_requests,
     list_registered_students,
     list_recent_channel_ids,
@@ -179,6 +198,7 @@ from db import (
     mark_schedule_run,
     remove_submission,
     reopen_form,
+    set_bot_channel,
     submit_form,
     update_form_announcement_channel,
 )
@@ -204,6 +224,25 @@ def _parse_user_datetime(raw_text: str) -> str | None:
         except ValueError:
             continue
     return None
+
+
+def _parse_channel_id(raw_text: str) -> int | None:
+    text = (raw_text or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).strip()
+    if not text:
+        return None
+    candidate = text[1:] if text.startswith("-") else text
+    if not candidate.isdigit():
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _channel_kind_label(channel_kind: str) -> str:
+    if channel_kind == CHANNEL_KIND_NOTES:
+        return "جزوه‌نویسی"
+    return "اطلاع‌رسانی"
 
 
 def _build_form_link(bot_username: str, share_token: str) -> str:
@@ -239,6 +278,48 @@ async def _show_form_detail(callback: CallbackQuery, form_id: int, bot: Bot) -> 
         form_summary_text(form_row, stats, questions, share_link=share_link),
         reply_markup=form_detail_markup(form_id, share_link=share_link),
     )
+
+
+async def _show_form_channels(target: Message | CallbackQuery, form_id: int) -> None:
+    form_row = get_form_by_id(form_id)
+    if not form_row:
+        return
+    available_channels = list_configured_bot_channels()
+    text = form_channel_settings_text(form_row, available_channels)
+    markup = form_channel_settings_markup(form_id, available_channels)
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+
+
+async def _show_bot_channels(target: Message | CallbackQuery) -> None:
+    channels = get_bot_channels()
+    text = bot_channels_settings_text(channels)
+    markup = admin_channel_settings_markup()
+    if isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=markup)
+    else:
+        await target.answer(text, reply_markup=markup)
+
+
+async def _finalize_form_create(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    registration = get_active_registration_by_tg_id(callback.from_user.id)
+    form_id = create_form(
+        title=data["title"],
+        description=data["description"],
+        deadline_at=data["deadline_at"],
+        capacity=data["capacity"],
+        waitlist_enabled=data["waitlist_enabled"],
+        created_by_tg_id=callback.from_user.id,
+        created_by_student_number=registration["student_number"],
+        questions=data.get("questions", []),
+        form_kind=data.get("form_kind", FORM_KIND_CUSTOM),
+        status=FORM_STATUS_OPEN,
+    )
+    await state.clear()
+    await _show_form_detail(callback, form_id, callback.bot)
 
 
 async def _show_pending_requests_page(callback: CallbackQuery, page: int) -> None:
@@ -507,11 +588,18 @@ async def publish_scheduled_form(bot: Bot, scheduler, schedule_id: int) -> None:
     else:
         with_deadline = template["deadline_at"]
     from db import get_connection
+    target_column = "notes_channel_id" if schedule["channel_kind"] == CHANNEL_KIND_NOTES else "class_channel_id"
     with get_connection() as conn:
-        conn.execute(
-            "UPDATE forms SET status = ?, deadline_at = ?, announcement_channel_id = ? WHERE id = ?",
-            (FORM_STATUS_OPEN, with_deadline, schedule["channel_id"], created_form_id),
-        )
+        if target_column == "class_channel_id":
+            conn.execute(
+                "UPDATE forms SET status = ?, deadline_at = ?, announcement_channel_id = ?, class_channel_id = ? WHERE id = ?",
+                (FORM_STATUS_OPEN, with_deadline, schedule["channel_id"], schedule["channel_id"], created_form_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE forms SET status = ?, deadline_at = ?, notes_channel_id = ? WHERE id = ?",
+                (FORM_STATUS_OPEN, with_deadline, schedule["channel_id"], created_form_id),
+            )
     created_form = get_form_by_id(created_form_id)
     link = await _build_form_share_link(bot, created_form["share_token"])
     reply_rows = []
@@ -543,7 +631,10 @@ async def start_handler(message: Message, state: FSMContext, bot: Bot) -> None:
         form = get_form_by_share_token(token)
         if form:
             questions = list_form_questions(form["id"])
-            await message.answer(form_join_text(form, questions), reply_markup=form_join_markup(form["id"]))
+            await message.answer(
+                form_join_text(form, questions),
+                reply_markup=form_join_markup(form["id"], form["form_kind"] or FORM_KIND_CUSTOM),
+            )
             return
     await show_home(message, state)
 
@@ -653,7 +744,6 @@ async def menu_register(callback: CallbackQuery, state: FSMContext) -> None:
         return
     await state.set_state(AuthStates.waiting_student_number)
     await callback.message.edit_text(verification_intro_text(), reply_markup=cancel_markup())
-    await callback.message.answer("🎓 شماره دانشجویی را بفرست.", reply_markup=cancel_markup())
 
 
 @router.message(AuthStates.waiting_student_number)
@@ -842,9 +932,21 @@ async def menu_rep_form_list(callback: CallbackQuery) -> None:
 async def begin_form_create(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.clear()
-    await state.update_data(questions=[])
+    await state.update_data(questions=[], form_kind=FORM_KIND_CUSTOM)
     await state.set_state(FormCreateStates.waiting_title)
-    await callback.message.edit_text("➕ عنوان فرم را بفرست.", reply_markup=cancel_markup())
+    await callback.message.edit_text("🧩 عنوان فرم سفارشی را بفرست.", reply_markup=cancel_markup())
+
+
+@router.callback_query(F.data == MENU_REP_FORM_CREATE_QUICK)
+async def begin_quick_form_create(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await state.update_data(questions=[], form_kind=FORM_KIND_QUICK_LIST)
+    await state.set_state(FormCreateStates.waiting_title)
+    await callback.message.edit_text(
+        "⚡ عنوان فرم سریع را بفرست. این نوع فرم فقط لیست تاییدشده‌ی نام و شماره دانشجویی جمع می‌کند.",
+        reply_markup=cancel_markup(),
+    )
 
 
 @router.message(FormCreateStates.waiting_title)
@@ -900,6 +1002,10 @@ async def create_form_waitlist(callback: CallbackQuery, state: FSMContext) -> No
     await callback.answer()
     waitlist_enabled = callback.data.endswith("yes")
     await state.update_data(waitlist_enabled=waitlist_enabled)
+    data = await state.get_data()
+    if data.get("form_kind") == FORM_KIND_QUICK_LIST:
+        await _finalize_form_create(callback, state)
+        return
     await state.set_state(FormCreateStates.waiting_question_type)
     await callback.message.edit_text("🧩 نوع سوال اول را انتخاب کن.", reply_markup=question_type_markup())
 
@@ -962,21 +1068,7 @@ async def create_question_next(callback: CallbackQuery, state: FSMContext) -> No
         await state.set_state(FormCreateStates.waiting_question_type)
         await callback.message.edit_text("🧩 نوع سوال بعدی را انتخاب کن.", reply_markup=question_type_markup())
         return
-    data = await state.get_data()
-    registration = get_active_registration_by_tg_id(callback.from_user.id)
-    form_id = create_form(
-        title=data["title"],
-        description=data["description"],
-        deadline_at=data["deadline_at"],
-        capacity=data["capacity"],
-        waitlist_enabled=data["waitlist_enabled"],
-        created_by_tg_id=callback.from_user.id,
-        created_by_student_number=registration["student_number"],
-        questions=data["questions"],
-        status=FORM_STATUS_OPEN,
-    )
-    await state.clear()
-    await _show_form_detail(callback, form_id, callback.bot)
+    await _finalize_form_create(callback, state)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_VIEW))
@@ -986,6 +1078,75 @@ async def view_form(callback: CallbackQuery, bot: Bot) -> None:
     if not await ensure_form_owner(callback, form_id):
         return
     await _show_form_detail(callback, form_id, bot)
+
+
+@router.callback_query(F.data.startswith(PREFIX_FORM_CHANNELS))
+async def view_form_channels(callback: CallbackQuery) -> None:
+    await callback.answer()
+    form_id = int(callback.data[len(PREFIX_FORM_CHANNELS):])
+    if not await ensure_form_owner(callback, form_id):
+        return
+    configured_channels = list_configured_bot_channels()
+    if len(configured_channels) == 1:
+        channel_kind, channel_id = configured_channels[0]
+        update_form_announcement_channel(form_id, channel_id)
+        await callback.answer(
+            f"چون فقط یک کانال سراسری تعیین شده، این فرم به کانال {_channel_kind_label(channel_kind)} فرستاده می‌شود.",
+            show_alert=True,
+        )
+        await _show_form_detail(callback, form_id, callback.bot)
+        return
+    await _show_form_channels(callback, form_id)
+
+
+@router.callback_query(F.data.startswith(PREFIX_FORM_CHANNEL_PICK))
+async def pick_form_channel(callback: CallbackQuery) -> None:
+    await callback.answer()
+    payload = callback.data[len(PREFIX_FORM_CHANNEL_PICK):]
+    form_id_raw, channel_kind = payload.split(":", 1)
+    form_id = int(form_id_raw)
+    if channel_kind not in {CHANNEL_KIND_CLASS, CHANNEL_KIND_NOTES}:
+        await callback.answer("نوع کانال نامعتبر است.", show_alert=True)
+        return
+    if not await ensure_form_owner(callback, form_id):
+        return
+    channels = get_bot_channels()
+    channel_id = channels.get(channel_kind)
+    if channel_id is None:
+        await callback.answer("این کانال سراسری هنوز ثبت نشده است.", show_alert=True)
+        return
+    update_form_announcement_channel(form_id, channel_id)
+    await callback.answer(f"کانال انتشار فرم روی {_channel_kind_label(channel_kind)} تنظیم شد.")
+    await _show_form_detail(callback, form_id, callback.bot)
+
+
+@router.callback_query(F.data.startswith(PREFIX_FORM_DELETE))
+async def confirm_form_delete(callback: CallbackQuery) -> None:
+    await callback.answer()
+    form_id = int(callback.data[len(PREFIX_FORM_DELETE):])
+    if not await ensure_form_owner(callback, form_id):
+        return
+    form_row = get_form_by_id(form_id)
+    if not form_row:
+        await callback.answer("فرم پیدا نشد.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        form_delete_confirmation_text(form_row),
+        reply_markup=form_delete_confirmation_markup(form_id),
+    )
+
+
+@router.callback_query(F.data.startswith(PREFIX_FORM_DELETE_CONFIRM))
+async def delete_form_handler(callback: CallbackQuery) -> None:
+    await callback.answer()
+    form_id = int(callback.data[len(PREFIX_FORM_DELETE_CONFIRM):])
+    if not await ensure_form_owner(callback, form_id):
+        return
+    removed = delete_form(form_id)
+    if not removed:
+        await callback.answer("فرم پیدا نشد.", show_alert=True)
+        return
+    await callback.message.edit_text("✅ فرم و داده‌های وابسته‌اش حذف شد.", reply_markup=forms_menu_markup())
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_JOIN))
@@ -1406,12 +1567,52 @@ async def begin_schedule(callback: CallbackQuery, state: FSMContext) -> None:
     form_id = int(callback.data.split(":")[1])
     if not await ensure_form_owner(callback, form_id):
         return
-    await state.set_state(ScheduleStates.waiting_channel_id)
-    await state.update_data(schedule_form_id=form_id)
-    recent_channels = list_recent_channel_ids()
-    await callback.message.answer(
-        "📢 کانال انتشار را انتخاب کن. اگر کانال در این فهرست نیست، از دکمه‌ی ورود دستی استفاده کن و شناسه را بفرست.",
-        reply_markup=schedule_channel_picker_markup(recent_channels),
+    form = get_form_by_id(form_id)
+    configured_channels = list_configured_bot_channels()
+    selected_channel_id = form["announcement_channel_id"] if form else None
+    auto_message = None
+    if not selected_channel_id:
+        if len(configured_channels) == 1:
+            channel_kind, selected_channel_id = configured_channels[0]
+            update_form_announcement_channel(form_id, selected_channel_id)
+            auto_message = (
+                f"چون فقط یک کانال سراسری تعیین شده، این فرم به کانال {_channel_kind_label(channel_kind)} فرستاده می‌شود.\n\n"
+            )
+        elif not configured_channels:
+            await callback.answer("هنوز کانال سراسری برای ربات ثبت نشده است.", show_alert=True)
+            return
+        else:
+            await callback.answer("اول کانال انتشار این فرم را انتخاب کن.", show_alert=True)
+            await _show_form_channels(callback, form_id)
+            return
+    channel_kind = CHANNEL_KIND_CLASS
+    for configured_kind, configured_channel_id in configured_channels:
+        if configured_channel_id == selected_channel_id:
+            channel_kind = configured_kind
+            break
+    if not selected_channel_id:
+        await callback.answer("کانال انتشار فرم مشخص نیست.", show_alert=True)
+        await _show_form_channels(callback, form_id)
+        return
+    await state.set_state(ScheduleStates.waiting_post_at)
+    await state.update_data(
+        schedule_form_id=form_id,
+        channel_id=selected_channel_id,
+        channel_kind=channel_kind,
+    )
+    await callback.message.edit_text(
+        (
+            (auto_message or "")
+            + f"📣 این فرم زمان‌دار در کانال {_channel_kind_label(channel_kind)} با شناسه {code(selected_channel_id)} منتشر می‌شود."
+        ),
+        reply_markup=cancel_markup(),
+    )
+    await _begin_date_picker(
+        callback.message,
+        state,
+        target="schedule_post_at",
+        label="زمان انتشار",
+        allow_none=False,
     )
 
 
@@ -1437,12 +1638,10 @@ async def schedule_channel_pick(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.message(ScheduleStates.waiting_channel_id)
 async def schedule_channel(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")).strip()
-    raw = normalize_student_number(text)
-    if not raw:
+    channel_id = _parse_channel_id(message.text or "")
+    if channel_id is None:
         await message.answer("⚠️ شناسه کانال نامعتبر است.", reply_markup=cancel_markup())
         return
-    channel_id = int(text)
     await state.update_data(channel_id=channel_id)
     await state.set_state(ScheduleStates.waiting_post_at)
     await _begin_date_picker(
@@ -1501,6 +1700,7 @@ async def finish_schedule(
         registration_deadline_at=data["registration_deadline_at"],
         recurring_rule=recurring_rule,
         created_by_tg_id=callback.from_user.id,
+        channel_kind=data.get("channel_kind", CHANNEL_KIND_CLASS),
     )
     from bot.services.scheduler import schedule_job
     schedule_job(scheduler, schedule_id, data["post_at"], callback=schedule_runner)
@@ -1524,6 +1724,99 @@ async def menu_admin_panel(callback: CallbackQuery) -> None:
     recent = list_recent_registrations()
     total_students = count_registered_students()
     await callback.message.edit_text(admin_panel_text(recent, total_students), reply_markup=admin_panel_markup())
+
+
+@router.callback_query(F.data == MENU_ADMIN_CHANNELS)
+async def menu_admin_channels(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.message.edit_text("⛔ دسترسی مدیریت نداری.", reply_markup=simple_back_home_markup())
+        return
+    await state.clear()
+    await _show_bot_channels(callback)
+
+
+@router.callback_query(F.data == MENU_ADMIN_BACKUP)
+async def admin_backup_database(callback: CallbackQuery, bot: Bot) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.message.edit_text("⛔ دسترسی مدیریت نداری.", reply_markup=simple_back_home_markup())
+        return
+    try:
+        archive_bytes, archive_name = build_database_backup_zip()
+    except FileNotFoundError:
+        await callback.message.answer("⚠️ فایل دیتابیس پیدا نشد.", reply_markup=admin_panel_markup())
+        return
+    await bot.send_document(
+        callback.from_user.id,
+        BufferedInputFile(archive_bytes, filename=archive_name),
+        caption="🗜 بکاپ ZIP دیتابیس ربات",
+    )
+    await callback.message.answer("✅ بکاپ دیتابیس در همین گفت‌وگو ارسال شد.", reply_markup=admin_panel_markup())
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_CHANNEL_SET))
+async def admin_channel_set(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.message.edit_text("⛔ دسترسی مدیریت نداری.", reply_markup=simple_back_home_markup())
+        return
+    channel_kind = callback.data[len(PREFIX_ADMIN_CHANNEL_SET):]
+    if channel_kind not in {CHANNEL_KIND_CLASS, CHANNEL_KIND_NOTES}:
+        await callback.answer("نوع کانال نامعتبر است.", show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_channel_id)
+    await state.update_data(admin_channel_kind=channel_kind)
+    recent_channels = list_recent_channel_ids(channel_kind=channel_kind)
+    await callback.message.edit_text(
+        f"📣 شناسه کانال {_channel_kind_label(channel_kind)} را انتخاب کن یا دستی وارد کن.",
+        reply_markup=admin_channel_picker_markup(channel_kind, recent_channels),
+    )
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_CHANNEL_PICK))
+async def admin_channel_pick(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        await callback.message.edit_text("⛔ دسترسی مدیریت نداری.", reply_markup=simple_back_home_markup())
+        return
+    payload = callback.data[len(PREFIX_ADMIN_CHANNEL_PICK):]
+    channel_kind, selected = payload.split(":", 1)
+    if selected == "manual":
+        await state.set_state(AdminStates.waiting_channel_id)
+        await state.update_data(admin_channel_kind=channel_kind)
+        await callback.message.edit_text(
+            f"📣 شناسه کانال {_channel_kind_label(channel_kind)} را بفرست. مثال: `-1001234567890`",
+            reply_markup=cancel_markup(),
+        )
+        return
+    channel_id = _parse_channel_id(selected)
+    if channel_id is None:
+        await callback.answer("شناسه کانال نامعتبر است.", show_alert=True)
+        return
+    set_bot_channel(channel_kind, channel_id)
+    await state.clear()
+    await _show_bot_channels(callback)
+
+
+@router.message(AdminStates.waiting_channel_id, F.text)
+async def admin_channel_submit(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    channel_kind = data.get("admin_channel_kind")
+    if channel_kind not in {CHANNEL_KIND_CLASS, CHANNEL_KIND_NOTES}:
+        await state.clear()
+        await message.answer("⚠️ تنظیم کانال سراسری در دسترس نیست.", reply_markup=admin_panel_markup())
+        return
+    channel_id = _parse_channel_id(message.text or "")
+    if channel_id is None:
+        await message.answer("⚠️ شناسه کانال نامعتبر است. نمونه: `-1001234567890`", reply_markup=cancel_markup())
+        return
+    set_bot_channel(channel_kind, channel_id)
+    await state.clear()
+    await message.answer(
+        f"✅ کانال {_channel_kind_label(channel_kind)} ذخیره شد: {code(channel_id)}\n\n{bot_channels_settings_text(get_bot_channels())}",
+        reply_markup=admin_channel_settings_markup(),
+    )
 
 
 @router.callback_query(F.data == MENU_ADMIN_STUDENTS)

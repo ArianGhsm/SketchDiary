@@ -8,44 +8,37 @@ from openpyxl import Workbook
 
 from bot.services.datetime_fa import format_datetime_fa, unix_timestamp
 from bot.services.formatting import code, e, status_badge
-from db import get_submission_answers, list_form_submissions
+from db import get_form_by_id, get_submission_answers, list_form_submissions
+
+
+def _visible_submissions(form_id: int):
+    rows = list_form_submissions(form_id, sort_by="submitted_at_asc")
+    return [row for row in rows if row["status"] != "removed"]
 
 
 def build_text_name_list(form_id: int) -> str:
-    rows = list_form_submissions(form_id, sort_by="submitted_at_asc")
+    rows = _visible_submissions(form_id)
     if not rows:
         return "هنوز هیچ پاسخی ثبت نشده است."
-    lines = ["📋 <b>فهرست ثبت‌نام‌ها بر اساس اولویت</b>", ""]
+    form_row = get_form_by_id(form_id)
+    title = form_row["title"] if form_row else f"فرم {form_id}"
+    lines = [f"📋 <b>فقط نام‌ها</b> — {e(title)}", ""]
     for index, row in enumerate(rows, start=1):
-        answers = get_submission_answers(row["id"])
-        answer_lines = []
-        for answer in answers:
-            answer_text = answer["answer_text"] or ", ".join(json.loads(answer["answer_json"] or "[]")) or "بدون پاسخ"
-            answer_lines.append(f"• <b>{e(answer['label'])}:</b> {e(answer_text)}")
-        lines.append(
-            f"{index}. <b>{e(row['full_name'])}</b>\n"
-            f"🕒 زمان ثبت: {code(format_datetime_fa(row['submitted_at']))}\n"
-            f"{chr(10).join(answer_lines) if answer_lines else '• پاسخ ثبت نشده'}"
-        )
+        suffix = " — لیست انتظار" if row["status"] == "waitlist" else ""
+        lines.append(f"{index}. <b>{e(row['full_name'])}</b>{suffix}")
     return "\n".join(lines)
 
 
 def build_text_name_student_list(form_id: int) -> str:
-    rows = list_form_submissions(form_id, sort_by="submitted_at_asc")
+    rows = _visible_submissions(form_id)
     if not rows:
         return "هنوز هیچ پاسخی ثبت نشده است."
-    lines = ["📋 <b>فهرست نام و شماره دانشجویی</b>", ""]
+    form_row = get_form_by_id(form_id)
+    title = form_row["title"] if form_row else f"فرم {form_id}"
+    lines = [f"📋 <b>فهرست نام و شماره دانشجویی</b> — {e(title)}", ""]
     for index, row in enumerate(rows, start=1):
-        answers = get_submission_answers(row["id"])
-        answer_lines = []
-        for answer in answers:
-            answer_text = answer["answer_text"] or ", ".join(json.loads(answer["answer_json"] or "[]")) or "بدون پاسخ"
-            answer_lines.append(f"• <b>{e(answer['label'])}:</b> {e(answer_text)}")
-        lines.append(
-            f"{index}. <b>{e(row['full_name'])}</b> — 🎓 {code(row['student_number'])}\n"
-            f"🕒 زمان ثبت: {code(format_datetime_fa(row['submitted_at']))}\n"
-            f"{chr(10).join(answer_lines) if answer_lines else '• پاسخ ثبت نشده'}"
-        )
+        suffix = " — لیست انتظار" if row["status"] == "waitlist" else ""
+        lines.append(f"{index}. <b>{e(row['full_name'])}</b> — 🎓 {code(row['student_number'])}{suffix}")
     return "\n".join(lines)
 
 

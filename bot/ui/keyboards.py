@@ -4,6 +4,8 @@ from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMa
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app_callbacks import (
+    MENU_ADMIN_BACKUP,
+    MENU_ADMIN_CHANNELS,
     MENU_ADMIN_PANEL,
     MENU_ADMIN_REMOVE,
     MENU_ADMIN_REMOVE_DIRECT,
@@ -16,6 +18,7 @@ from app_callbacks import (
     MENU_REP_BROADCAST,
     MENU_REP_FORMS,
     MENU_REP_FORM_CREATE,
+    MENU_REP_FORM_CREATE_QUICK,
     MENU_REP_FORM_LIST,
     MENU_REP_IMPORT_GRADES,
     MENU_REP_PANEL,
@@ -23,6 +26,8 @@ from app_callbacks import (
     MENU_REP_SCHEDULES,
     PREFIX_ADD_ANOTHER_QUESTION,
     PREFIX_ADMIN_REMOVE_CANCEL,
+    PREFIX_ADMIN_CHANNEL_PICK,
+    PREFIX_ADMIN_CHANNEL_SET,
     PREFIX_ADMIN_REMOVE_CONFIRM,
     PREFIX_ADMIN_REMOVE_SELECT,
     PREFIX_ADMIN_STUDENT_SEARCH,
@@ -35,6 +40,10 @@ from app_callbacks import (
     PREFIX_FORM_DUPLICATE,
     PREFIX_FORM_EXPORT,
     PREFIX_FORM_JOIN,
+    PREFIX_FORM_CHANNELS,
+    PREFIX_FORM_CHANNEL_PICK,
+    PREFIX_FORM_DELETE,
+    PREFIX_FORM_DELETE_CONFIRM,
     PREFIX_FORM_MANUAL_ADD,
     PREFIX_FORM_REMOVE_SUBMISSION,
     PREFIX_FORM_REMIND,
@@ -133,6 +142,8 @@ def admin_panel_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [_button("👥 دانشجوهای تاییدشده", callback_data=MENU_ADMIN_STUDENTS)],
+            [_button("📡 کانال‌های سراسری", callback_data=MENU_ADMIN_CHANNELS)],
+            [_button("🗜 بکاپ دیتابیس", callback_data=MENU_ADMIN_BACKUP)],
             [_button("🗑 حذف ثبت فعال", callback_data=MENU_ADMIN_REMOVE, kind="danger")],
             [_button("⌨️ حذف با شماره دانشجویی", callback_data=MENU_ADMIN_REMOVE_DIRECT, kind="danger")],
             [_button("↩️ منوی اصلی", callback_data=MENU_HOME)],
@@ -156,7 +167,10 @@ def forms_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _button("➕ ساخت فرم جدید", callback_data=MENU_REP_FORM_CREATE, kind="success"),
+                _button("🧩 فرم سفارشی", callback_data=MENU_REP_FORM_CREATE, kind="success"),
+                _button("⚡ ساخت سریع لیست", callback_data=MENU_REP_FORM_CREATE_QUICK, kind="success"),
+            ],
+            [
                 _button("📚 فرم‌های من", callback_data=MENU_REP_FORM_LIST),
             ],
             [_button("↩️ پنل نماینده", callback_data=MENU_REP_PANEL)],
@@ -207,20 +221,25 @@ def form_detail_markup(form_id: int, share_link: str | None = None) -> InlineKey
         _button("🧬 کپی ساختار فرم", callback_data=f"{PREFIX_FORM_DUPLICATE}{form_id}"),
     )
     kb.row(
+        _button("📣 کانال انتشار", callback_data=f"{PREFIX_FORM_CHANNELS}{form_id}"),
         _button("⏰ زمان‌بندی انتشار", callback_data=f"{PREFIX_SCHEDULE_FORM}{form_id}"),
-        _button("🔴 بستن فرم", callback_data=f"{PREFIX_FORM_CLOSE}{form_id}", kind="danger"),
     )
     kb.row(
+        _button("🔴 بستن فرم", callback_data=f"{PREFIX_FORM_CLOSE}{form_id}", kind="danger"),
         _button("🟢 بازگشایی فرم", callback_data=f"{PREFIX_FORM_REOPEN}{form_id}", kind="success"),
+    )
+    kb.row(
+        _button("🗑 حذف فرم", callback_data=f"{PREFIX_FORM_DELETE}{form_id}", kind="danger"),
         _button("↩️ فرم‌ها", callback_data=MENU_REP_FORMS),
     )
     return kb.as_markup()
 
 
-def form_join_markup(form_id: int) -> InlineKeyboardMarkup:
+def form_join_markup(form_id: int, form_kind: str = "custom") -> InlineKeyboardMarkup:
+    submit_label = "✅ تایید عضویت در لیست" if form_kind == "quick_list" else "✅ شروع پاسخ‌گویی"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_button("✅ شروع پاسخ‌گویی", callback_data=f"{PREFIX_FORM_JOIN}{form_id}", kind="success")],
+            [_button(submit_label, callback_data=f"{PREFIX_FORM_JOIN}{form_id}", kind="success")],
             [_button("↩️ منوی اصلی", callback_data=MENU_HOME)],
         ]
     )
@@ -324,6 +343,51 @@ def schedule_detail_markup(schedule_id: int) -> InlineKeyboardMarkup:
             [_button("↩️ زمان‌بندی‌ها", callback_data=MENU_REP_SCHEDULES)],
         ]
     )
+
+
+def form_channel_settings_markup(form_id: int, available_channels: list[tuple[str, int]]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    labels = {
+        "class": "📣 اطلاع‌رسانی",
+        "notes": "📝 جزوه",
+    }
+    for channel_kind, channel_id in available_channels:
+        title = labels.get(channel_kind, "📣 کانال")
+        kb.row(_button(f"{title} — {channel_id}", callback_data=f"{PREFIX_FORM_CHANNEL_PICK}{form_id}:{channel_kind}"))
+    kb.row(_button("↩️ بازگشت به فرم", callback_data=f"{PREFIX_FORM_VIEW}{form_id}"))
+    return kb.as_markup()
+
+
+def form_delete_confirmation_markup(form_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _button("🗑 حذف نهایی فرم", callback_data=f"{PREFIX_FORM_DELETE_CONFIRM}{form_id}", kind="danger"),
+                _button("↩️ انصراف", callback_data=f"{PREFIX_FORM_VIEW}{form_id}"),
+            ]
+        ]
+    )
+
+
+def admin_channel_settings_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _button("📣 کانال اطلاع‌رسانی", callback_data=f"{PREFIX_ADMIN_CHANNEL_SET}class"),
+                _button("📝 کانال جزوه", callback_data=f"{PREFIX_ADMIN_CHANNEL_SET}notes"),
+            ],
+            [_button("↩️ پنل مدیریت", callback_data=MENU_ADMIN_PANEL)],
+        ]
+    )
+
+
+def admin_channel_picker_markup(channel_kind: str, channel_ids: list[int]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for channel_id in channel_ids[:6]:
+        kb.row(_button(f"📣 {channel_id}", callback_data=f"{PREFIX_ADMIN_CHANNEL_PICK}{channel_kind}:{channel_id}"))
+    kb.row(_button("⌨️ واردکردن شناسه دستی", callback_data=f"{PREFIX_ADMIN_CHANNEL_PICK}{channel_kind}:manual"))
+    kb.row(_button("↩️ کانال‌های سراسری", callback_data=MENU_ADMIN_CHANNELS))
+    return kb.as_markup()
 
 
 def admin_student_list_markup(
