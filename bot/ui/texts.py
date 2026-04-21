@@ -3,193 +3,331 @@ from __future__ import annotations
 import json
 from typing import Iterable
 
+from bot.services.date_picker import MONTH_NAMES, picker_summary
 from bot.services.datetime_fa import build_deadline_lines, render_telegram_time
-from bot.services.formatting import code, e, labeled_row, quote_lines
+from bot.services.formatting import code, e, html_list, info_card, labeled_row, quote_lines, status_badge
+
+
+def _username_text(username: str | None) -> str:
+    return code(f"@{username}") if username else code("ندارد")
 
 
 def home_text(verified: bool) -> str:
     if verified:
-        return "👋 <b>پنل اصلی آماده است.</b>\nاز دکمه‌های زیر استفاده کن."
-    return "👋 <b>خوش آمدی.</b>\nبرای ورود کامل، احراز هویت را شروع کن."
+        return (
+            "👋 <b>پنل اصلی آماده است.</b>\n"
+            "همه‌ی بخش‌های دانشجویی و مدیریتی از دکمه‌های زیر در دسترس تو هستند."
+        )
+    return (
+        "👋 <b>به SketchDiary خوش آمدی.</b>\n"
+        "برای فعال‌شدن امکانات دانشجویی، احراز هویت را از همین‌جا شروع کن."
+    )
 
 
 def verification_intro_text() -> str:
-    return (
-        "🔐 <b>احراز هویت دانشجو</b>\n"
-        "شماره دانشجویی را می‌گیریم، سپس یک معرفی کوتاه از شما دریافت می‌کنیم و درخواست برای نماینده ارسال می‌شود."
+    return info_card(
+        "🔐 احراز هویت دانشجو",
+        [
+            "در این مرحله فقط شماره دانشجویی و یک معرفی کوتاه از شما گرفته می‌شود.",
+            "درخواست برای نماینده‌ها ارسال می‌شود و بعد از تایید، حساب تلگرام به شماره دانشجویی متصل خواهد شد.",
+            "تا قبل از تایید، دسترسی کامل دانشجویی فعال نمی‌شود.",
+        ],
     )
 
 
 def verification_request_message(request_row) -> str:
-    username_text = code(f"@{request_row['username']}") if request_row["username"] else code("ندارد")
     return (
-        "📢 <b>درخواست تایید حساب جدید</b>\n\n"
-        + quote_lines(
+        info_card(
+            "📢 درخواست تایید حساب جدید",
             [
-                labeled_row("👤", "نام", e(request_row["full_name"])),
+                labeled_row("👤", "نام و نام خانوادگی", e(request_row["full_name"])),
                 labeled_row("🎓", "شماره دانشجویی", code(request_row["student_number"])),
-                labeled_row("🆔", "آیدی عددی", code(request_row["telegram_user_id"])),
-                labeled_row("🔗", "یوزرنیم", username_text),
-                labeled_row("📝", "معرفی", e(request_row["profile_text"])),
-                render_telegram_time(request_row["requested_at"], "زمان درخواست"),
-            ]
+                labeled_row("🆔", "آیدی عددی تلگرام", code(request_row["telegram_user_id"])),
+                labeled_row("🔗", "یوزرنیم تلگرام", _username_text(request_row["username"])),
+                labeled_row("📝", "معرفی کوتاه", e(request_row["profile_text"])),
+                render_telegram_time(request_row["requested_at"], "زمان ثبت درخواست"),
+            ],
         )
-        + "\n\n⚠️ تایید یک نماینده کافی است."
+        + "\n\n⚠️ تایید یک نماینده کافی است و بعد از تصمیم نهایی، نتیجه به دانشجو هم اعلام می‌شود."
     )
 
 
 def profile_text(registered) -> str:
-    username_text = code(f"@{registered['username']}") if registered["username"] else code("ندارد")
-    return (
-        "👤 <b>پروفایل تاییدشده</b>\n\n"
-        + quote_lines(
-            [
-                labeled_row("👤", "نام", e(registered["full_name"])),
-                labeled_row("🎓", "شماره دانشجویی", code(registered["student_number"])),
-                labeled_row("🆔", "آیدی عددی", code(registered["telegram_user_id"])),
-                labeled_row("🔗", "یوزرنیم", username_text),
-                labeled_row("📝", "معرفی", e(registered["profile_text"])),
-                render_telegram_time(registered["approved_at"], "زمان تایید"),
-            ]
-        )
+    return info_card(
+        "👤 پروفایل تاییدشده",
+        [
+            labeled_row("👤", "نام", e(registered["full_name"])),
+            labeled_row("🎓", "شماره دانشجویی", code(registered["student_number"])),
+            labeled_row("🆔", "آیدی عددی تلگرام", code(registered["telegram_user_id"])),
+            labeled_row("🔗", "یوزرنیم", _username_text(registered["username"])),
+            labeled_row("📝", "معرفی کوتاه", e(registered["profile_text"])),
+            render_telegram_time(registered["approved_at"], "زمان تایید"),
+        ],
     )
 
 
 def grades_text(registered, grades: dict, insights) -> str:
-    items = [f"• <b>{e(key)}:</b> {code(value)}" for key, value in grades.items()]
+    items = [f"<b>{e(key)}:</b> {code(value)}" for key, value in grades.items()]
     analytics = [
-        f"• میانگین شما: {code(f'{insights.personal_average:.2f}')}" if insights.personal_average is not None else "• میانگین شما: ناموجود",
-        f"• رتبه شما: {code(insights.rank_position)} از {code(insights.rank_total)}" if insights.rank_position is not None else "• رتبه شما: ناموجود",
-        f"• میانگین کلاس: {code(f'{insights.class_average:.2f}')}" if insights.class_average is not None else "• میانگین کلاس: ناموجود",
-        f"• فاصله با میانگین کلاس: {code(f'{insights.delta_from_class_average:+.2f}')}" if insights.delta_from_class_average is not None else "• فاصله با میانگین کلاس: ناموجود",
+        f"میانگین شما: {code(f'{insights.personal_average:.2f}')}" if insights.personal_average is not None else "میانگین شما: ناموجود",
+        f"رتبه شما: {code(insights.rank_position)} از {code(insights.rank_total)}" if insights.rank_position is not None else "رتبه شما: ناموجود",
+        f"میانگین کلاس: {code(f'{insights.class_average:.2f}')}" if insights.class_average is not None else "میانگین کلاس: ناموجود",
+        f"فاصله با میانگین کلاس: {code(f'{insights.delta_from_class_average:+.2f}')}" if insights.delta_from_class_average is not None else "فاصله با میانگین کلاس: ناموجود",
     ]
     return (
-        "📊 <b>کارنامه و تحلیل عملکرد</b>\n\n"
-        + quote_lines(
+        info_card(
+            "📊 کارنامه و تحلیل عملکرد",
             [
                 labeled_row("👤", "نام", e(registered["full_name"])),
                 labeled_row("🎓", "شماره دانشجویی", code(registered["student_number"])),
-            ]
+            ],
         )
         + "\n\n<b>نمره‌ها</b>\n"
-        + ("\n".join(items) if items else "هنوز نمره‌ای ثبت نشده است.")
+        + (html_list(items) if items else "هنوز نمره‌ای ثبت نشده است.")
         + "\n\n<b>تحلیل</b>\n"
-        + "\n".join(analytics)
+        + html_list(analytics)
     )
 
 
 def representative_panel_text(pending_count: int, form_count: int, schedule_count: int) -> str:
-    return (
-        "🎓 <b>پنل نماینده کلاس</b>\n\n"
-        + quote_lines(
-            [
-                labeled_row("🟢", "درخواست‌های در انتظار", code(pending_count)),
-                labeled_row("🗂", "فرم‌های شما", code(form_count)),
-                labeled_row("⏰", "زمان‌بندی‌های فعال", code(schedule_count)),
-            ]
-        )
+    return info_card(
+        "🎓 پنل نماینده کلاس",
+        [
+            labeled_row("🟢", "درخواست‌های در انتظار", code(pending_count)),
+            labeled_row("🗂", "فرم‌های شما", code(form_count)),
+            labeled_row("⏰", "زمان‌بندی‌های فعال", code(schedule_count)),
+        ],
     )
 
 
-def pending_requests_text(rows: Iterable, page: int) -> str:
+def pending_requests_text(rows: Iterable, page: int, total_pages: int) -> str:
     rows = list(rows)
-    lines = [f"🟢 <b>درخواست‌های در انتظار - صفحه {code(page)}</b>"]
+    lines = [f"🟢 <b>درخواست‌های در انتظار</b> — صفحه {code(page)} از {code(total_pages)}", ""]
     if not rows:
-        lines.append("در حال حاضر درخواست بازی وجود ندارد.")
+        lines.append("در حال حاضر درخواست بازی برای بررسی وجود ندارد.")
         return "\n".join(lines)
     for row in rows:
         lines.append(
-            f"• {e(row['full_name'])} — {code(row['student_number'])} — {render_telegram_time(row['requested_at'], 'ثبت')}"
+            quote_lines(
+                [
+                    labeled_row("👤", "نام", e(row["full_name"])),
+                    labeled_row("🎓", "شماره دانشجویی", code(row["student_number"])),
+                    labeled_row("🆔", "آیدی عددی", code(row["telegram_user_id"])),
+                    labeled_row("🔗", "یوزرنیم", _username_text(row["username"])),
+                    render_telegram_time(row["requested_at"], "زمان ثبت"),
+                ]
+            )
         )
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
-def form_summary_text(form_row, stats: dict, questions: list) -> str:
+def form_summary_text(form_row, stats: dict, questions: list, share_link: str | None = None) -> str:
     question_lines = []
     for index, question in enumerate(questions, start=1):
         options = json.loads(question["options_json"] or "[]")
-        suffix = f" ({', '.join(options)})" if options else ""
-        question_lines.append(f"{index}. {question['label']} — {question['field_type']}{suffix}")
+        suffix = f" | گزینه‌ها: {e(' / '.join(options))}" if options else ""
+        question_lines.append(
+            f"{code(index)}. <b>{e(question['label'])}</b>\n"
+            f"• نوع: {code(question['field_type'])}\n"
+            f"• وضعیت: {code('اجباری' if question['is_required'] else 'اختیاری')}{suffix}"
+        )
+
+    share_block = ""
+    if share_link:
+        share_block = "\n" + quote_lines(
+            [
+                labeled_row("🔗", "لینک ورود دانشجو", code(share_link)),
+                labeled_row("🧷", "توکن اشتراک", code(form_row["share_token"])),
+            ]
+        )
+
     return (
-        "🗂 <b>جزئیات فرم</b>\n\n"
-        + quote_lines(
+        info_card(
+            "🗂 جزئیات فرم",
             [
                 labeled_row("🗂", "عنوان", e(form_row["title"])),
                 labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
-                labeled_row("🔗", "توکن اشتراک", code(form_row["share_token"])),
                 labeled_row("📦", "ظرفیت", code(form_row["capacity"] or "نامحدود")),
+                labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
                 labeled_row("🪪", "Waitlist", code("فعال" if form_row["waitlist_enabled"] else "غیرفعال")),
                 render_telegram_time(form_row["created_at"], "زمان ساخت"),
                 *build_deadline_lines(form_row["deadline_at"]),
-            ]
+            ],
         )
+        + share_block
         + "\n\n<b>آمار ثبت‌نام</b>\n"
-        + "\n".join(
+        + html_list(
             [
-                f"• تاییدشده: {code(stats['submitted_count'])}",
-                f"• لیست انتظار: {code(stats['waitlist_count'])}",
-                f"• حذف‌شده: {code(stats['removed_count'])}",
-                f"• کل رکوردها: {code(stats['total_count'])}",
+                f"تاییدشده: {code(stats['submitted_count'])}",
+                f"لیست انتظار: {code(stats['waitlist_count'])}",
+                f"حذف‌شده: {code(stats['removed_count'])}",
+                f"کل رکوردها: {code(stats['total_count'])}",
             ]
         )
         + "\n\n<b>سوال‌ها</b>\n"
-        + ("\n".join(question_lines) if question_lines else "هنوز سوالی ثبت نشده است.")
+        + ("\n\n".join(question_lines) if question_lines else "هنوز سوالی ثبت نشده است.")
     )
 
 
 def submissions_text(form_row, submissions: list, title: str = "ثبت‌نام‌ها") -> str:
-    lines = [f"📋 <b>{title}</b> — {e(form_row['title'])}", ""]
+    lines = [f"📋 <b>{e(title)}</b> — {e(form_row['title'])}", ""]
     if not submissions:
         lines.append("هیچ رکوردی پیدا نشد.")
         return "\n".join(lines)
     for row in submissions[:30]:
-        username = f" — {code('@' + row['username'])}" if row["username"] else ""
         lines.append(
-            f"{code(row['registration_order'])}. <b>{e(row['full_name'])}</b> — {code(row['student_number'])}{username}\n"
-            f"• وضعیت: {code(row['status'])}\n"
-            f"• زمان ثبت: {render_telegram_time(row['submitted_at'], 'ثبت')}"
+            quote_lines(
+                [
+                    labeled_row("👤", "نام", e(row["full_name"])),
+                    labeled_row("🎓", "شماره دانشجویی", code(row["student_number"])),
+                    labeled_row("🔗", "یوزرنیم", _username_text(row["username"])),
+                    labeled_row("🔢", "ترتیب ثبت", code(row["registration_order"])),
+                    labeled_row("🚦", "وضعیت", status_badge(row["status"])),
+                    render_telegram_time(row["submitted_at"], "زمان ثبت"),
+                ]
+            )
         )
     if len(submissions) > 30:
         lines.append(f"... و {len(submissions) - 30} مورد دیگر")
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def form_join_text(form_row, questions: list) -> str:
-    return (
-        "🗂 <b>فرم آماده پاسخ‌گویی است</b>\n\n"
-        + quote_lines(
-            [
-                labeled_row("🗂", "عنوان", e(form_row["title"])),
-                labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
-                labeled_row("❓", "تعداد سوال", code(len(questions))),
-                *build_deadline_lines(form_row["deadline_at"]),
-            ]
-        )
+    return info_card(
+        "🗂 فرم آماده پاسخ‌گویی است",
+        [
+            labeled_row("🗂", "عنوان", e(form_row["title"])),
+            labeled_row("📝", "توضیح", e(form_row["description"] or "بدون توضیح")),
+            labeled_row("❓", "تعداد سوال", code(len(questions))),
+            labeled_row("🚦", "وضعیت", status_badge(form_row["status"])),
+            *build_deadline_lines(form_row["deadline_at"]),
+        ],
     )
 
 
 def ask_question_text(index: int, total: int, question_row) -> str:
     options = json.loads(question_row["options_json"] or "[]")
-    option_block = "\n".join(f"• {e(option)}" for option in options)
-    text = (
-        f"❓ <b>سوال {code(index)} از {code(total)}</b>\n\n"
-        f"{e(question_row['label'])}\n"
-        f"• نوع: {code(question_row['field_type'])}\n"
-        f"• وضعیت: {code('اجباری' if question_row['is_required'] else 'اختیاری')}"
-    )
+    option_block = html_list(e(option) for option in options)
+    lines = [
+        labeled_row("🔢", "ترتیب", f"{code(index)} از {code(total)}"),
+        labeled_row("🧩", "نوع", code(question_row["field_type"])),
+        labeled_row("📌", "الزام", code("اجباری" if question_row["is_required"] else "اختیاری")),
+    ]
     if option_block:
-        text += "\n\n<b>گزینه‌ها</b>\n" + option_block
-    return text
+        lines.append("<b>گزینه‌ها</b>\n" + option_block)
+    return f"❓ <b>{e(question_row['label'])}</b>\n\n{quote_lines(lines)}"
 
 
-def schedule_list_text(rows: Iterable) -> str:
+def schedule_list_text(rows: Iterable, page: int, total_pages: int) -> str:
     rows = list(rows)
-    lines = ["⏰ <b>زمان‌بندی‌های ثبت‌شده</b>"]
+    lines = [f"⏰ <b>زمان‌بندی‌های ثبت‌شده</b> — صفحه {code(page)} از {code(total_pages)}", ""]
     if not rows:
         lines.append("هنوز زمان‌بندی فعالی ثبت نشده است.")
         return "\n".join(lines)
     for row in rows:
         lines.append(
-            f"• شناسه {code(row['id'])} — کانال {code(row['channel_id'])} — {render_telegram_time(row['post_at'], 'ارسال')}"
+            quote_lines(
+                [
+                    labeled_row("🆔", "شناسه", code(row["id"])),
+                    labeled_row("📣", "کانال", code(row["channel_id"])),
+                    labeled_row("🔁", "تکرار", code(row["recurring_rule"] or "فقط یک‌بار")),
+                    labeled_row("🚦", "وضعیت", code("فعال" if row["is_active"] else "غیرفعال")),
+                    render_telegram_time(row["post_at"], "زمان انتشار"),
+                    render_telegram_time(row["last_run_at"], "آخرین اجرا") if row["last_run_at"] else "",
+                ]
+            )
         )
-    return "\n".join(lines)
+    return "\n\n".join(lines)
+
+
+def schedule_detail_text(schedule_row, template_form) -> str:
+    return info_card(
+        "⏰ جزئیات زمان‌بندی",
+        [
+            labeled_row("🆔", "شناسه", code(schedule_row["id"])),
+            labeled_row("🗂", "فرم الگو", e(template_form["title"]) if template_form else code(schedule_row["template_form_id"])),
+            labeled_row("📣", "کانال", code(schedule_row["channel_id"])),
+            labeled_row("🔁", "تکرار", code(schedule_row["recurring_rule"] or "فقط یک‌بار")),
+            labeled_row("🚦", "وضعیت", code("فعال" if schedule_row["is_active"] else "غیرفعال")),
+            render_telegram_time(schedule_row["post_at"], "انتشار بعدی"),
+            *build_deadline_lines(schedule_row["registration_deadline_at"]),
+            render_telegram_time(schedule_row["last_run_at"], "آخرین اجرا") if schedule_row["last_run_at"] else "",
+        ],
+    )
+
+
+def admin_panel_text(recent_rows: Iterable, total_students: int) -> str:
+    recent_rows = list(recent_rows)
+    lines = [labeled_row("👥", "دانشجوهای تاییدشده", code(total_students))]
+    if recent_rows:
+        lines.append("<b>ثبت‌های اخیر</b>")
+        for row in recent_rows:
+            lines.append(
+                f"• <b>{e(row['full_name'])}</b> — {code(row['student_number'])} — {render_telegram_time(row['approved_at'], 'زمان تایید')}"
+            )
+    else:
+        lines.append("هنوز ثبت تاییدشده‌ای وجود ندارد.")
+    return "🛠 <b>پنل مدیریت</b>\n\n" + "\n".join(lines)
+
+
+def registered_students_text(rows: Iterable, page: int, total_pages: int, total_students: int) -> str:
+    rows = list(rows)
+    lines = [f"👥 <b>دانشجوهای تاییدشده</b> — صفحه {code(page)} از {code(total_pages)}", f"مجموع فعال: {code(total_students)}", ""]
+    if not rows:
+        lines.append("دانشجوی فعالی برای نمایش وجود ندارد.")
+        return "\n".join(lines)
+    for row in rows:
+        lines.append(
+            quote_lines(
+                [
+                    labeled_row("👤", "نام", e(row["full_name"])),
+                    labeled_row("🎓", "شماره دانشجویی", code(row["student_number"])),
+                    labeled_row("🆔", "آیدی عددی", code(row["telegram_user_id"])),
+                    labeled_row("🔗", "یوزرنیم", _username_text(row["username"])),
+                    render_telegram_time(row["approved_at"], "زمان تایید"),
+                ]
+            )
+        )
+    return "\n\n".join(lines)
+
+
+def admin_remove_confirmation_text(registered) -> str:
+    return (
+        info_card(
+            "🗑 تایید غیرفعال‌سازی ثبت فعال",
+            [
+                labeled_row("👤", "نام", e(registered["full_name"])),
+                labeled_row("🎓", "شماره دانشجویی", code(registered["student_number"])),
+                labeled_row("🆔", "آیدی عددی", code(registered["telegram_user_id"])),
+                labeled_row("🔗", "یوزرنیم", _username_text(registered["username"])),
+                render_telegram_time(registered["approved_at"], "زمان تایید فعلی"),
+            ],
+        )
+        + "\n\n⚠️ این عملیات دسترسی فعال این حساب را قطع می‌کند و دانشجو باید دوباره احراز هویت را طی کند."
+    )
+
+
+def date_picker_text(data: dict) -> str:
+    step_titles = {
+        "year": "انتخاب سال",
+        "month": "انتخاب ماه",
+        "day": "انتخاب روز",
+        "hour": "انتخاب ساعت",
+        "minute": "انتخاب دقیقه",
+        "confirm": "تایید نهایی",
+    }
+    month_label = MONTH_NAMES[data["month"] - 1]
+    selection_lines = [
+        labeled_row("🗂", "فیلد", e(data["label"])),
+        labeled_row("📅", "سال", code(data["year"])),
+        labeled_row("🗓", "ماه", code(f"{data['month']:02d} | {month_label}")),
+        labeled_row("📌", "روز", code(f"{data['day']:02d}")),
+        labeled_row("🕒", "ساعت", code(f"{data['hour']:02d}:{data['minute']:02d}")),
+        labeled_row("📍", "منطقه زمانی", code("تهران")),
+        labeled_row("✅", "انتخاب فعلی", code(picker_summary(data))),
+    ]
+    return (
+        f"🧭 <b>{step_titles.get(data['step'], 'انتخاب زمان')}</b>\n\n"
+        + quote_lines(selection_lines)
+        + "\n\nاز دکمه‌های زیر استفاده کن. تا جای ممکن نیازی به تایپ نیست."
+    )

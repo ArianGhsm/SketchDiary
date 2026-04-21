@@ -1,108 +1,285 @@
-# معماری پروژه
+# معماری SketchDiary
 
-## لایه‌ها
+این سند معماری واقعی پروژه را از روی ساختار فعلی کد توضیح می‌دهد.
+
+---
+
+## تصویر کلی
+
+پروژه یک بات تلگرامی مبتنی بر `aiogram 3` است که با این لایه‌ها کار می‌کند:
+
+1. لایه bootstrap و startup
+2. لایه application و wiring
+3. لایه handlerها و flowها
+4. لایه UI شامل متن و کیبورد
+5. لایه service برای helperهای قابل استفاده‌ی مجدد
+6. لایه data access در `db.py`
+
+---
+
+## 1. Bootstrap
 
 ### `main.py`
 
-- bootstrap
-- init دیتابیس
-- seed اولیه
-- اجرای polling با `aiogram`
+وظیفه‌ها:
+
+- تنظیم logging
+- اجرای `init_db()`
+- seed اولیه از `data/default_students.csv`
+- ساخت `Bot` و `Dispatcher`
+- حذف webhook قبلی
+- جلوگیری از اجرای هم‌زمان polling با فایل قفل
+
+فایل قفل:
+
+```text
+data/bot.polling.lock
+```
+
+---
+
+## 2. Application Wiring
 
 ### `bot/application.py`
 
-- ساخت `Bot` و `Dispatcher`
-- ثبت router
-- راه‌اندازی و shutdown `APScheduler`
-- بارگذاری jobهای ذخیره‌شده
+این فایل لایه‌ی اتصال اجزای اصلی است:
+
+- ساخت نمونه‌ی `Bot`
+- ساخت `Dispatcher`
+- include کردن router اصلی
+- ساخت و راه‌اندازی `APScheduler`
+- ثبت startup/shutdown hook
+
+قرارداد مهم:
+
+- jobهای زمان‌بندی‌شده از دیتابیس خوانده می‌شوند
+- callback اجرای schedule به `publish_scheduled_form` وصل است
+
+---
+
+## 3. Handler Layer
 
 ### `bot/handlers.py`
 
-هسته‌ی جریان‌های ربات:
-
-- احراز هویت
-- بررسی درخواست‌ها
-- پروفایل و نمره‌ها
-- پنل نماینده
-- ساخت فرم
-- پاسخ‌دهی به فرم
-- export
-- schedule
-- پنل مدیر
-
-### `bot/ui/`
-
-- `texts.py`: متن‌های کاربرمحور
-- `keyboards.py`: کیبوردهای اینلاین
-
-### `bot/services/`
-
-- `datetime_fa.py`: زمان جلالی/تهران
-- `formatting.py`: helperهای نمایش
-- `parsers.py`: پارس ورودی‌های متنی
-- `policies.py`: نقش‌ها و permission
-- `exporters.py`: خروجی‌های CSV/XLSX/JSON/Text
-- `scheduler.py`: helperهای APScheduler
-
-### `db.py`
-
-لایه‌ی داده برای:
-
-- احراز هویت
-- دانشجوها و نمره‌ها
-- فرم‌ها و سوال‌ها
-- پاسخ‌ها و order ثبت
-- scheduleها
-
-## قراردادهای معماری
-
-### Inline-First
-
-entry point همه‌ی featureها باید callback اینلاین باشد.
-
-### Auth-First
-
-تا قبل از تایید احراز هویت:
-
-- پروفایل
-- کارنامه
-- ثبت فرم
-
-در دسترس کامل نیستند.
-
-### Central Formatting
-
-برای داده‌های قابل‌کپی و زمان‌های مهم از helperهای مشترک استفاده می‌شود تا متن‌ها در کل پروژه یکدست بمانند.
-
-### Data in `data/`
-
-فایل‌های عملیاتی بیرون از `data/` ساخته نمی‌شوند.
-
-## جریان‌های اصلی
+این فایل هسته‌ی جریان‌های بات است. مهم‌ترین گروه‌ها:
 
 ### احراز هویت
 
-1. ثبت شماره دانشجویی
-2. ثبت معرفی کوتاه
-3. ساخت `verification_requests`
-4. ارسال کارت بررسی به نماینده
-5. تایید یا رد
-6. ثبت نهایی در `telegram_students`
+- شروع احراز هویت
+- دریافت شماره دانشجویی
+- دریافت معرفی کوتاه
+- ساخت `verification_requests`
+- ارسال کارت بررسی به نماینده‌ها و مدیرها
+- تایید/رد نهایی و اطلاع‌رسانی به دانشجو
 
-### فرم
+### فرم و ثبت‌نام
 
-1. ساخت فرم توسط نماینده
-2. ساخت سوال‌ها
-3. انتشار مستقیم یا زمان‌بندی‌شده
-4. ثبت پاسخ دانشجو
-5. ذخیره در `form_submissions` و `submission_answers`
-6. export و عملیات مدیریتی
+- ساخت فرم
+- تعریف سوال‌ها
+- شروع پاسخ‌گویی دانشجو
+- ذخیره‌ی پاسخ‌ها
+- مدیریت فرم توسط نماینده
 
-### زمان‌بندی
+### پنل نماینده
 
-1. انتخاب فرم الگو
-2. ثبت کانال
-3. ثبت زمان انتشار
-4. ثبت مهلت فرم منتشرشده
-5. ثبت job در scheduler
-6. ساخت نسخه جدید فرم و انتشار در کانال
+- لیست درخواست‌های در انتظار
+- ثبت گروهی نمره
+- اطلاعیه همگانی
+- مدیریت فرم‌ها
+- زمان‌بندی‌ها
+
+### پنل مدیر
+
+- مشاهده‌ی دانشجوهای تاییدشده
+- مشاهده‌ی ثبت‌های اخیر
+- غیرفعال‌سازی ثبت فعال با تایید نهایی
+
+---
+
+## 4. UI Layer
+
+### `bot/ui/texts.py`
+
+این فایل محل تولید متن‌های HTML است.
+
+قواعد این لایه:
+
+- متن‌ها فارسی و کاربرمحور باشند
+- داده‌های قابل‌کپی با `monospace`
+- زمان‌های مهم با helperهای مرکزی رندر شوند
+- متن خام در handlerها کمتر شود
+
+### `bot/ui/keyboards.py`
+
+این فایل همه‌ی keyboardهای اینلاین را متمرکز نگه می‌دارد.
+
+قواعد این لایه:
+
+- button semantics یکدست
+- استفاده از `style="success" / "danger" / "primary"`
+- دکمه‌های `copy_text` برای موارد مناسب
+- back/cancel/home در flowها
+
+---
+
+## 5. Service Layer
+
+### `bot/services/date_picker.py`
+
+منطق reusable picker تاریخ/زمان:
+
+- state پیش‌فرض انتخاب
+- navigation بین سال و ماه
+- محدودکردن روزهای نامعتبر
+- تبدیل انتخاب جلالی به UTC
+- summary مرحله‌ای انتخاب کاربر
+
+### `bot/services/datetime_fa.py`
+
+مسئول:
+
+- تبدیل زمان‌ها به `Asia/Tehran`
+- نمایش جلالی
+- ساخت `<tg-time unix="...">...</tg-time>`
+- نمایش زمان باقی‌مانده
+
+### `bot/services/exporters.py`
+
+مسئول:
+
+- خروجی متنی فرم
+- خروجی `CSV`
+- خروجی `XLSX`
+- خروجی `JSON`
+
+### `bot/services/formatting.py`
+
+helperهای نمایش:
+
+- escape
+- monospace
+- blockquote
+- badge وضعیت
+- کارت‌های اطلاعاتی
+
+### `bot/services/media.py`
+
+منطق fallback تصویر:
+
+- استفاده از عکس پروفایل تلگرام در صورت وجود
+- fallback به فایل محلی `data/default_verification_photo.png`
+
+### `bot/services/parsers.py`
+
+- parse لیست نمره‌ها
+- parse callbackها
+
+### `bot/services/policies.py`
+
+- تشخیص نقش‌ها
+- normalizing شناسه‌ها
+- سیاست‌های احراز هویت و نمایندگی
+
+### `bot/services/scheduler.py`
+
+- ساخت scheduler
+- load کردن jobها از دیتابیس
+- محاسبه‌ی زمان بعدی برای scheduleهای recurring
+
+---
+
+## 6. Data Layer
+
+### `db.py`
+
+این فایل DAL پروژه است و همه‌ی queryهای اصلی را در خود دارد.
+
+### جدول‌های اصلی
+
+- `students`
+- `representatives`
+- `telegram_students`
+- `verification_requests`
+- `student_grades`
+- `forms`
+- `form_questions`
+- `form_submissions`
+- `submission_answers`
+- `form_schedules`
+
+### قراردادهای داده
+
+- زمان‌ها به‌صورت UTC ذخیره می‌شوند
+- نمایش زمان در UI همیشه جلالی/تهران است
+- ترتیب ثبت فرم با `registration_order` نگه‌داری می‌شود
+- حذف ثبت فرم به‌صورت status-based انجام می‌شود، نه delete فیزیکی
+
+---
+
+## 7. Flow Contracts
+
+### Inline-First
+
+- feature جدید باید از callback اینلاین شروع شود
+- message text فقط در data-entry استفاده شود
+
+### Auth-First
+
+قبل از تایید احراز هویت، این بخش‌ها نباید دسترسی کامل بدهند:
+
+- پروفایل
+- کارنامه
+- پاسخ‌گویی به فرم
+
+### Safe Destructive Actions
+
+عملیات خطرناک باید:
+
+- context کافی بدهند
+- اثر نهایی را روشن کنند
+- دکمه‌ی تایید خطر (`danger`) داشته باشند
+- امکان انصراف بدهند
+
+---
+
+## 8. توسعه‌ی قابلیت جدید
+
+اگر قابلیت تازه‌ای اضافه می‌کنید:
+
+1. callback آن را در `app_callbacks.py` ثبت کنید
+2. متن‌ها را در `bot/ui/texts.py` بسازید
+3. keyboardها را در `bot/ui/keyboards.py` تعریف کنید
+4. helperهای مشترک را به `bot/services/` ببرید
+5. در صورت نیاز query جدید را به `db.py` اضافه کنید
+6. مستندات را هم‌زمان به‌روزرسانی کنید
+
+---
+
+## 9. نقاط حساس معماری
+
+### Race Condition در تایید احراز هویت
+
+تصمیم نهایی درخواست در `decide_verification_request` انجام می‌شود تا:
+
+- فقط اولین تصمیم معتبر اعمال شود
+- اتصال تکراری شماره دانشجویی جلوگیری شود
+
+### Polling Conflict
+
+اجرای هم‌زمان polling هم از سمت تلگرام و هم روی سیستم محلی می‌تواند conflict ایجاد کند. برای همین:
+
+- `delete_webhook()` در startup اجرا می‌شود
+- فایل lock محلی ساخته می‌شود
+
+### Schedule Persistence
+
+زمان‌بندی‌ها در دیتابیس می‌مانند و بعد از restart دوباره load می‌شوند.
+
+---
+
+## اسناد مرتبط
+
+- [README اصلی](./README.md)
+- [سیاست UX](./INLINE_UX_POLICY_FA.md)
+- [راهنمای مشارکت](./CONTRIBUTING_FA.md)
+- [مستندات پوشه bot](./bot/README.md)

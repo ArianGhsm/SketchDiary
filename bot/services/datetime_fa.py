@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Iterable
 from zoneinfo import ZoneInfo
 
 import jdatetime
@@ -60,6 +59,15 @@ def format_datetime_fa(value: str | datetime | None) -> str:
     return f"{date_text} - {time_text}"
 
 
+def unix_timestamp(value: str | datetime | None) -> int | None:
+    if value is None:
+        return None
+    dt = parse_db_datetime(value) if isinstance(value, str) else ensure_utc(value)
+    if dt is None:
+        return None
+    return int(dt.timestamp())
+
+
 def render_telegram_time(value: str | datetime | None, label: str = "زمان") -> str:
     if value is None:
         return f"🕒 <b>{e(label)}:</b> نامشخص"
@@ -67,9 +75,9 @@ def render_telegram_time(value: str | datetime | None, label: str = "زمان") 
     if dt is None:
         return f"🕒 <b>{e(label)}:</b> نامشخص"
     date_text, time_text = _jalali_parts(dt)
-    visible = code(f"{date_text} - {time_text}")
+    visible = e(f"{date_text} - {time_text}")
     return (
-        f"🕒 <b>{e(label)}:</b> "
+        f"🗓 <b>{e(label)}:</b> "
         f"<tg-time unix=\"{int(dt.timestamp())}\">{visible}</tg-time> "
         f"به وقت تهران"
     )
@@ -120,5 +128,5 @@ def build_deadline_lines(value: str | datetime | None) -> list[str]:
         return []
     return [
         f"⏳ <b>زمان باقی‌مانده:</b> {e(format_relative_time_fa(value))}",
-        f"🗓 <b>مهلت نهایی:</b> {render_telegram_time(value, 'مهلت ثبت‌نام')}",
+        render_telegram_time(value, "مهلت نهایی"),
     ]

@@ -36,3 +36,25 @@ def html_list(items: Iterable[str]) -> str:
 
 def fa_code(value: object) -> str:
     return code(fa(str(value)))
+
+
+def status_badge(status: str) -> str:
+    mapping = {
+        "approved": "🟢 تاییدشده",
+        "rejected": "🔴 ردشده",
+        "pending": "🟡 در انتظار",
+        "submitted": "🟢 ثبت‌شده",
+        "waitlist": "🟡 لیست انتظار",
+        "removed": "🔴 حذف‌شده",
+        "open": "🟢 باز",
+        "closed": "🔴 بسته",
+        "draft": "🟡 پیش‌نویس",
+    }
+    return mapping.get(status, e(status))
+
+
+def info_card(title: str, lines: Iterable[str]) -> str:
+    prepared = [line for line in lines if line]
+    if not prepared:
+        return bold(title)
+    return f"{bold(title)}\n\n{quote_lines(prepared)}"

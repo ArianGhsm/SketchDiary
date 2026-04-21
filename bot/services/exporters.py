@@ -6,6 +6,8 @@ from io import BytesIO, StringIO
 
 from openpyxl import Workbook
 
+from bot.services.datetime_fa import format_datetime_fa, unix_timestamp
+from bot.services.formatting import code, e, status_badge
 from db import get_submission_answers, list_form_submissions
 
 
@@ -13,17 +15,38 @@ def build_text_name_list(form_id: int) -> str:
     rows = list_form_submissions(form_id, sort_by="submitted_at_asc")
     if not rows:
         return "هنوز هیچ پاسخی ثبت نشده است."
-    return "\n".join(f"{index}. {row['full_name']}" for index, row in enumerate(rows, start=1))
+    lines = ["📋 <b>فهرست ثبت‌نام‌ها بر اساس اولویت</b>", ""]
+    for index, row in enumerate(rows, start=1):
+        answers = get_submission_answers(row["id"])
+        answer_lines = []
+        for answer in answers:
+            answer_text = answer["answer_text"] or ", ".join(json.loads(answer["answer_json"] or "[]")) or "بدون پاسخ"
+            answer_lines.append(f"• <b>{e(answer['label'])}:</b> {e(answer_text)}")
+        lines.append(
+            f"{index}. <b>{e(row['full_name'])}</b>\n"
+            f"🕒 زمان ثبت: {code(format_datetime_fa(row['submitted_at']))}\n"
+            f"{chr(10).join(answer_lines) if answer_lines else '• پاسخ ثبت نشده'}"
+        )
+    return "\n".join(lines)
 
 
 def build_text_name_student_list(form_id: int) -> str:
     rows = list_form_submissions(form_id, sort_by="submitted_at_asc")
     if not rows:
         return "هنوز هیچ پاسخی ثبت نشده است."
-    return "\n".join(
-        f"{index}. {row['full_name']} - {row['student_number']}"
-        for index, row in enumerate(rows, start=1)
-    )
+    lines = ["📋 <b>فهرست نام و شماره دانشجویی</b>", ""]
+    for index, row in enumerate(rows, start=1):
+        answers = get_submission_answers(row["id"])
+        answer_lines = []
+        for answer in answers:
+            answer_text = answer["answer_text"] or ", ".join(json.loads(answer["answer_json"] or "[]")) or "بدون پاسخ"
+            answer_lines.append(f"• <b>{e(answer['label'])}:</b> {e(answer_text)}")
+        lines.append(
+            f"{index}. <b>{e(row['full_name'])}</b> — 🎓 {code(row['student_number'])}\n"
+            f"🕒 زمان ثبت: {code(format_datetime_fa(row['submitted_at']))}\n"
+            f"{chr(10).join(answer_lines) if answer_lines else '• پاسخ ثبت نشده'}"
+        )
+    return "\n".join(lines)
 
 
 def _build_export_rows(form_id: int) -> list[dict]:
@@ -36,7 +59,9 @@ def _build_export_rows(form_id: int) -> list[dict]:
             "telegram_user_id": submission["telegram_user_id"],
             "username": submission["username"] or "",
             "status": submission["status"],
-            "submitted_at": submission["submitted_at"],
+            "status_fa": status_badge(submission["status"]),
+            "submitted_at_fa": format_datetime_fa(submission["submitted_at"]),
+            "submitted_at_unix": unix_timestamp(submission["submitted_at"]) or "",
             "registration_order": submission["registration_order"],
         }
         for answer in get_submission_answers(submission["id"]):

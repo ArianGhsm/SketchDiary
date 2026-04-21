@@ -8,11 +8,13 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from app_callbacks import (
     MENU_ADMIN_PANEL,
     MENU_ADMIN_REMOVE,
+    MENU_ADMIN_REMOVE_DIRECT,
+    MENU_ADMIN_STUDENTS,
     MENU_CANCEL,
     MENU_GRADES,
     MENU_HOME,
@@ -27,9 +29,13 @@ from app_callbacks import (
     MENU_REP_PENDING,
     MENU_REP_SCHEDULES,
     PREFIX_ADD_ANOTHER_QUESTION,
+    PREFIX_ADMIN_REMOVE_CANCEL,
+    PREFIX_ADMIN_REMOVE_CONFIRM,
+    PREFIX_ADMIN_REMOVE_SELECT,
     PREFIX_CHECKBOX_DONE,
     PREFIX_CHECKBOX_TOGGLE,
     PREFIX_CHOICE_PICK,
+    PREFIX_DATE_PICKER,
     PREFIX_FORM_CLOSE,
     PREFIX_FORM_DUPLICATE,
     PREFIX_FORM_EXPORT,
@@ -44,12 +50,15 @@ from app_callbacks import (
     PREFIX_QUESTION_TYPE,
     PREFIX_REQUIRED,
     PREFIX_SCHEDULE_CANCEL,
+    PREFIX_SCHEDULE_DEACTIVATE,
     PREFIX_SCHEDULE_FORM,
+    PREFIX_SCHEDULE_VIEW,
     PREFIX_VERIFY_APPROVE,
     PREFIX_VERIFY_REJECT,
 )
+from bot.services.date_picker import clamp_day, default_picker_state, jalali_selection_to_utc_iso, now_jalali, shift_month
 from assistant_profile import PROFILE
-from bot.services.datetime_fa import TEHRAN_TZ, format_datetime_fa, parse_db_datetime, utc_now
+from bot.services.datetime_fa import TEHRAN_TZ, format_datetime_fa, parse_db_datetime, render_telegram_time, utc_now
 from bot.services.exporters import (
     build_csv_bytes,
     build_json_bytes,
@@ -58,6 +67,7 @@ from bot.services.exporters import (
     build_xlsx_bytes,
 )
 from bot.services.formatting import code, e
+from bot.services.media import resolve_verification_photo
 from bot.services.parsers import parse_grade_list_text
 from bot.services.policies import (
     is_admin,
@@ -80,30 +90,41 @@ from bot.states import (
 from bot.ui.keyboards import (
     add_another_question_markup,
     admin_panel_markup,
+    admin_remove_confirmation_markup,
+    admin_student_list_markup,
     cancel_markup,
     checkbox_markup,
+    date_picker_markup,
     form_detail_markup,
     form_join_markup,
     form_list_markup,
     forms_menu_markup,
     home_markup,
+    pending_requests_markup,
     question_type_markup,
     rep_panel_markup,
     required_markup,
+    schedule_detail_markup,
+    schedule_list_markup,
     schedule_recurring_markup,
     simple_back_home_markup,
     single_choice_markup,
     verification_request_markup,
 )
 from bot.ui.texts import (
+    admin_panel_text,
+    admin_remove_confirmation_text,
     ask_question_text,
+    date_picker_text,
     form_join_text,
     form_summary_text,
     grades_text,
     home_text,
     pending_requests_text,
     profile_text,
+    registered_students_text,
     representative_panel_text,
+    schedule_detail_text,
     schedule_list_text,
     submissions_text,
     verification_intro_text,
@@ -116,6 +137,7 @@ from db import (
     attach_rep_message_refs,
     bulk_upsert_course_grades,
     close_form,
+    count_registered_students,
     count_active_form_submissions,
     create_form,
     create_form_schedule,
@@ -131,6 +153,7 @@ from db import (
     get_form_by_share_token,
     get_form_statistics,
     get_form_submission,
+    get_registered_student_by_student_number,
     get_pending_request_by_user_id,
     get_schedule,
     get_student_grades,
@@ -144,6 +167,7 @@ from db import (
     list_non_submitters,
     list_open_forms,
     list_pending_verification_requests,
+    list_registered_students,
     list_recent_registrations,
     list_students_with_grades,
     manual_add_submission,
@@ -160,6 +184,8 @@ router = Router()
 
 FORMS_PAGE_SIZE = 8
 PENDING_PAGE_SIZE = 8
+SCHEDULES_PAGE_SIZE = 8
+ADMIN_STUDENTS_PAGE_SIZE = 6
 
 
 def _parse_user_datetime(raw_text: str) -> str | None:
@@ -177,6 +203,210 @@ def _parse_user_datetime(raw_text: str) -> str | None:
 
 def _build_form_link(bot_username: str, share_token: str) -> str:
     return f"https://t.me/{bot_username}?start=form_{share_token}"
+
+
+async def _get_user_photo(bot: Bot, user_id: int):
+    try:
+        photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
+    except Exception:
+        return None
+    if not photos.photos:
+        return None
+    return photos.photos[0][-1].file_id
+
+
+async def _build_form_share_link(bot: Bot, share_token: str) -> str | None:
+    try:
+        me = await bot.get_me()
+    except Exception:
+        return None
+    if not me.username:
+        return None
+    return _build_form_link(me.username, share_token)
+
+
+async def _show_form_detail(callback: CallbackQuery, form_id: int, bot: Bot) -> None:
+    form_row = get_form_by_id(form_id)
+    questions = list_form_questions(form_id)
+    stats = get_form_statistics(form_id)
+    share_link = await _build_form_share_link(bot, form_row["share_token"]) if form_row else None
+    await callback.message.edit_text(
+        form_summary_text(form_row, stats, questions, share_link=share_link),
+        reply_markup=form_detail_markup(form_id, share_link=share_link),
+    )
+
+
+async def _show_pending_requests_page(callback: CallbackQuery, page: int) -> None:
+    total = len(list_pending_verification_requests(limit=1000, offset=0))
+    pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    rows = list_pending_verification_requests(limit=PENDING_PAGE_SIZE, offset=(page - 1) * PENDING_PAGE_SIZE)
+    await callback.message.edit_text(
+        pending_requests_text(rows, page, pages),
+        reply_markup=pending_requests_markup(page, pages),
+    )
+
+
+async def _show_schedule_page(callback: CallbackQuery, page: int) -> None:
+    schedules = list_form_schedules(callback.from_user.id)
+    pages = max(1, (len(schedules) + SCHEDULES_PAGE_SIZE - 1) // SCHEDULES_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    chunk = schedules[(page - 1) * SCHEDULES_PAGE_SIZE : page * SCHEDULES_PAGE_SIZE]
+    await callback.message.edit_text(
+        schedule_list_text(chunk, page, pages),
+        reply_markup=schedule_list_markup(chunk, page, pages),
+    )
+
+
+async def _show_admin_students_page(callback: CallbackQuery, page: int) -> None:
+    total = count_registered_students()
+    pages = max(1, (total + ADMIN_STUDENTS_PAGE_SIZE - 1) // ADMIN_STUDENTS_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    rows = list_registered_students(limit=ADMIN_STUDENTS_PAGE_SIZE, offset=(page - 1) * ADMIN_STUDENTS_PAGE_SIZE)
+    await callback.message.edit_text(
+        registered_students_text(rows, page, pages, total),
+        reply_markup=admin_student_list_markup(rows, page, pages),
+    )
+
+
+async def _finalize_verification_messages(bot: Bot, request_row, decision_text: str) -> None:
+    refs = []
+    try:
+        refs = json.loads(request_row["rep_message_refs_json"] or "[]")
+    except json.JSONDecodeError:
+        refs = []
+
+    final_text = verification_request_message(request_row) + f"\n\n{decision_text}"
+    for ref in refs:
+        chat_id = ref.get("chat_id")
+        message_id = ref.get("message_id")
+        if not chat_id or not message_id:
+            continue
+        try:
+            await bot.edit_message_caption(
+                chat_id=chat_id,
+                message_id=message_id,
+                caption=final_text,
+                reply_markup=None,
+            )
+            continue
+        except Exception:
+            pass
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=final_text,
+                reply_markup=None,
+            )
+        except Exception:
+            continue
+
+
+async def _send_date_picker(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    picker = data.get("date_picker")
+    if not picker:
+        return
+    await message.answer(date_picker_text(picker), reply_markup=date_picker_markup(picker))
+
+
+async def _edit_date_picker(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    picker = data.get("date_picker")
+    if not picker:
+        await callback.answer("انتخاب‌گر زمان در دسترس نیست.", show_alert=True)
+        return
+    await callback.message.edit_text(date_picker_text(picker), reply_markup=date_picker_markup(picker))
+
+
+async def _begin_date_picker(
+    message: Message,
+    state: FSMContext,
+    *,
+    target: str,
+    label: str,
+    allow_none: bool,
+) -> None:
+    await state.update_data(date_picker=default_picker_state(target=target, label=label, allow_none=allow_none))
+    await _send_date_picker(message, state)
+
+
+async def _finalize_date_picker(callback: CallbackQuery, state: FSMContext, *, selected_iso: str | None) -> None:
+    data = await state.get_data()
+    picker = data.get("date_picker", {})
+    target = picker.get("target")
+    await state.update_data(date_picker=None)
+
+    if target == "form_deadline":
+        await state.update_data(deadline_at=selected_iso)
+        await state.set_state(FormCreateStates.waiting_capacity)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            (
+                f"✅ مهلت فرم ثبت شد: {code(format_datetime_fa(selected_iso))}"
+                if selected_iso
+                else "✅ فرم بدون مهلت ساخته می‌شود."
+            ),
+            reply_markup=cancel_markup(),
+        )
+        await callback.message.answer("📦 ظرفیت را عددی بفرست یا «ندارد» را ارسال کن.", reply_markup=cancel_markup())
+        return
+
+    if target == "schedule_post_at":
+        await state.update_data(post_at=selected_iso)
+        await state.set_state(ScheduleStates.waiting_deadline)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            f"✅ زمان انتشار ثبت شد: {code(format_datetime_fa(selected_iso))}",
+            reply_markup=cancel_markup(),
+        )
+        await _begin_date_picker(
+            callback.message,
+            state,
+            target="schedule_deadline",
+            label="مهلت ثبت‌نام فرم",
+            allow_none=True,
+        )
+        return
+
+    if target == "schedule_deadline":
+        await state.update_data(registration_deadline_at=selected_iso)
+        await state.set_state(ScheduleStates.waiting_recurring)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            (
+                f"✅ مهلت فرم ثبت شد: {code(format_datetime_fa(selected_iso))}"
+                if selected_iso
+                else "✅ فرم منتشرشده بدون مهلت ثبت می‌شود."
+            ),
+            reply_markup=schedule_recurring_markup(),
+        )
+        return
+
+    if target == "answer_datetime":
+        question = data["questions"][data["question_index"]]
+        answers = data.get("answers", {})
+        if selected_iso is None and question["is_required"]:
+            await callback.answer("این سوال اجباری است.", show_alert=True)
+            return
+        if selected_iso is None:
+            answers[str(question["id"])] = {"answer_text": "", "answer_json": []}
+        else:
+            answers[str(question["id"])] = {
+                "answer_text": format_datetime_fa(selected_iso),
+                "answer_json": [selected_iso],
+            }
+        await state.update_data(answers=answers, question_index=data["question_index"] + 1)
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.answer(
+            (
+                f"✅ زمان انتخاب شد: {code(format_datetime_fa(selected_iso))}"
+                if selected_iso
+                else "✅ این سوال بدون مقدار رد شد."
+            )
+        )
+        await prompt_next_question(callback.message, state)
 
 
 async def show_home(target: Message | CallbackQuery, state: FSMContext) -> None:
@@ -217,13 +447,7 @@ async def send_verification_cards(bot: Bot, request_id: int, user_id: int) -> No
     if not request_row:
         return
     refs = []
-    photo = None
-    try:
-        photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
-        if photos.photos:
-            photo = photos.photos[0][-1].file_id
-    except Exception:
-        photo = None
+    photo = resolve_verification_photo(await _get_user_photo(bot, user_id))
 
     for reviewer_id in verification_reviewer_ids():
         try:
@@ -232,13 +456,13 @@ async def send_verification_cards(bot: Bot, request_id: int, user_id: int) -> No
                     reviewer_id,
                     photo=photo,
                     caption=verification_request_message(request_row),
-                    reply_markup=verification_request_markup(request_id),
+                    reply_markup=verification_request_markup(request_id, request_row["student_number"]),
                 )
             else:
                 sent = await bot.send_message(
                     reviewer_id,
                     verification_request_message(request_row),
-                    reply_markup=verification_request_markup(request_id),
+                    reply_markup=verification_request_markup(request_id, request_row["student_number"]),
                 )
             refs.append({"chat_id": reviewer_id, "message_id": sent.message_id})
         except Exception:
@@ -271,18 +495,19 @@ async def publish_scheduled_form(bot: Bot, scheduler, schedule_id: int) -> None:
             (FORM_STATUS_OPEN, with_deadline, schedule["channel_id"], created_form_id),
         )
     created_form = get_form_by_id(created_form_id)
-    me = await bot.get_me()
-    link = _build_form_link(me.username, created_form["share_token"])
+    link = await _build_form_share_link(bot, created_form["share_token"])
+    reply_rows = []
+    if link:
+        reply_rows.append([InlineKeyboardButton(text="📌 ثبت‌نام در فرم", url=link, style="success")])
+        reply_rows.append([InlineKeyboardButton(text="📋 کپی لینک", copy_text=CopyTextButton(text=link), style="primary")])
     await bot.send_message(
         chat_id=schedule["channel_id"],
         text=(
             f"📢 <b>فرم ثبت‌نام {e(created_form['title'])} فعال شد</b>\n\n"
             f"📝 {e(created_form['description'] or 'بدون توضیح')}\n"
-            f"⏰ مهلت: {code(format_datetime_fa(created_form['deadline_at']) if created_form['deadline_at'] else 'ندارد')}"
+            f"{render_telegram_time(created_form['deadline_at'], 'مهلت ثبت‌نام') if created_form['deadline_at'] else '🗓 <b>مهلت ثبت‌نام:</b> ندارد'}"
         ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="📌 ثبت‌نام در فرم", url=link)]]
-        ),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=reply_rows) if reply_rows else None,
     )
     next_post = next_recurring_post(schedule["post_at"], schedule["recurring_rule"])
     mark_schedule_run(schedule_id, next_post)
@@ -321,6 +546,77 @@ async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
 async def menu_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer("لغو شد.")
     await show_home(callback, state)
+
+
+@router.callback_query(F.data.startswith(PREFIX_DATE_PICKER))
+async def handle_date_picker(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    picker = data.get("date_picker")
+    if not picker:
+        await callback.answer("انتخاب‌گر زمان فعال نیست.", show_alert=True)
+        return
+
+    payload = callback.data[len(PREFIX_DATE_PICKER):]
+    action, value = payload.split(":", 1)
+
+    if action == "year_base":
+        picker["year_base"] = int(value)
+    elif action == "set_year":
+        picker["year"] = int(value)
+        picker["year_base"] = picker["year"] - 1
+        picker["step"] = "month"
+    elif action == "set_month":
+        picker["month"] = int(value)
+        picker["day"] = clamp_day(picker["year"], picker["month"], picker["day"])
+        picker["step"] = "day"
+    elif action == "nav_month":
+        year, month = shift_month(picker["year"], picker["month"], int(value))
+        picker["year"] = year
+        picker["month"] = month
+        picker["day"] = clamp_day(year, month, picker["day"])
+        picker["step"] = "day"
+    elif action == "set_day":
+        picker["day"] = int(value)
+        picker["step"] = "hour"
+    elif action == "set_hour":
+        picker["hour"] = int(value)
+        picker["step"] = "minute"
+    elif action == "set_minute":
+        picker["minute"] = int(value)
+        picker["step"] = "confirm"
+    elif action == "back":
+        picker["step"] = value
+    elif action == "today":
+        now = now_jalali()
+        picker["year"] = now.year
+        picker["month"] = now.month
+        picker["day"] = now.day
+        picker["hour"] = now.hour
+        picker["minute"] = (now.minute // 5) * 5
+        picker["step"] = "confirm"
+    elif action == "clear":
+        picker = default_picker_state(
+            target=picker["target"],
+            label=picker["label"],
+            allow_none=bool(picker.get("allow_none")),
+        )
+    elif action == "skip":
+        await _finalize_date_picker(callback, state, selected_iso=None)
+        return
+    elif action == "confirm":
+        selected_iso = jalali_selection_to_utc_iso(
+            picker["year"],
+            picker["month"],
+            picker["day"],
+            picker["hour"],
+            picker["minute"],
+        )
+        await _finalize_date_picker(callback, state, selected_iso=selected_iso)
+        return
+
+    await state.update_data(date_picker=picker)
+    await _edit_date_picker(callback, state)
 
 
 @router.callback_query(F.data == MENU_REGISTER)
@@ -408,22 +704,32 @@ async def review_verification(callback: CallbackQuery, bot: Bot) -> None:
     if not request_row:
         await callback.answer("درخواست پیدا نشد.", show_alert=True)
         return
-    await callback.message.edit_reply_markup(reply_markup=None)
     if result in {"already_reviewed", "student_number_already_linked"}:
+        await _finalize_verification_messages(bot, request_row, "⚠️ این درخواست قبلا نهایی شده است.")
         await callback.answer("این درخواست قبلا نهایی شده است.", show_alert=True)
         return
     if approve:
+        await _finalize_verification_messages(bot, request_row, "✅ این حساب تایید شد و به شماره دانشجویی متصل شد.")
         await bot.send_message(
             request_row["telegram_user_id"],
-            "✅ احراز هویت شما تایید شد.",
+            (
+                "✅ <b>احراز هویت شما تایید شد.</b>\n"
+                f"🎓 شماره دانشجویی: {code(request_row['student_number'])}\n"
+                "امکانات دانشجویی از همین حالا برای شما فعال است."
+            ),
             reply_markup=home_markup(request_row["telegram_user_id"], True),
         )
     else:
+        await _finalize_verification_messages(bot, request_row, "❌ این درخواست رد شد.")
         await bot.send_message(
             request_row["telegram_user_id"],
-            "❌ درخواست احراز هویت شما رد شد. از منوی اصلی دوباره تلاش کن.",
+            (
+                "❌ <b>درخواست احراز هویت شما رد شد.</b>\n"
+                "از منوی اصلی دوباره فرایند احراز هویت را شروع کن و اطلاعات کامل‌تری بفرست."
+            ),
             reply_markup=home_markup(request_row["telegram_user_id"], False),
         )
+    await callback.answer("تصمیم شما ثبت شد.")
 
 
 @router.callback_query(F.data == MENU_PROFILE)
@@ -473,16 +779,7 @@ async def menu_rep_panel(callback: CallbackQuery) -> None:
 @router.callback_query(F.data == MENU_REP_PENDING)
 async def menu_rep_pending(callback: CallbackQuery) -> None:
     await callback.answer()
-    page = 1
-    rows = list_pending_verification_requests(limit=PENDING_PAGE_SIZE, offset=0)
-    total = len(list_pending_verification_requests(limit=1000, offset=0))
-    pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=(
-            [[InlineKeyboardButton(text="▶️ بعدی", callback_data=f"{PREFIX_PAGE}pending:2")]] if pages > 1 else []
-        ) + [[InlineKeyboardButton(text="↩️ پنل نماینده", callback_data=MENU_REP_PANEL)]]
-    )
-    await callback.message.edit_text(pending_requests_text(rows, page), reply_markup=kb)
+    await _show_pending_requests_page(callback, page=1)
 
 
 @router.callback_query(F.data.startswith(f"{PREFIX_PAGE}"))
@@ -492,25 +789,19 @@ async def paginate(callback: CallbackQuery) -> None:
     section, page_raw = payload.split(":")
     page = max(1, int(page_raw))
     if section == "pending":
-        total = len(list_pending_verification_requests(limit=1000, offset=0))
-        pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
-        rows = list_pending_verification_requests(limit=PENDING_PAGE_SIZE, offset=(page - 1) * PENDING_PAGE_SIZE)
-        kb_rows = []
-        nav = []
-        if page > 1:
-            nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=f"{PREFIX_PAGE}pending:{page - 1}"))
-        if page < pages:
-            nav.append(InlineKeyboardButton(text="▶️ بعدی", callback_data=f"{PREFIX_PAGE}pending:{page + 1}"))
-        if nav:
-            kb_rows.append(nav)
-        kb_rows.append([InlineKeyboardButton(text="↩️ پنل نماینده", callback_data=MENU_REP_PANEL)])
-        await callback.message.edit_text(pending_requests_text(rows, page), reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+        await _show_pending_requests_page(callback, page)
         return
     if section == "forms":
         forms = list_forms_by_creator(callback.from_user.id)
         pages = max(1, (len(forms) + FORMS_PAGE_SIZE - 1) // FORMS_PAGE_SIZE)
         chunk = forms[(page - 1) * FORMS_PAGE_SIZE : page * FORMS_PAGE_SIZE]
         await callback.message.edit_text("📚 <b>فرم‌های من</b>", reply_markup=form_list_markup(chunk, page, pages))
+        return
+    if section == "schedules":
+        await _show_schedule_page(callback, page)
+        return
+    if section == "admin_students":
+        await _show_admin_students_page(callback, page)
 
 
 @router.callback_query(F.data == MENU_REP_FORMS)
@@ -550,14 +841,20 @@ async def create_form_description(message: Message, state: FSMContext) -> None:
     description = (message.text or "").strip()
     await state.update_data(description="" if description == "ندارد" else description)
     await state.set_state(FormCreateStates.waiting_deadline)
-    await message.answer("⏰ مهلت را با قالب <code>2026/04/30 18:30</code> بفرست یا «ندارد».", reply_markup=cancel_markup())
+    await _begin_date_picker(
+        message,
+        state,
+        target="form_deadline",
+        label="مهلت فرم",
+        allow_none=True,
+    )
 
 
 @router.message(FormCreateStates.waiting_deadline)
 async def create_form_deadline(message: Message, state: FSMContext) -> None:
     deadline = _parse_user_datetime(message.text or "")
     if (message.text or "").strip() not in {"ندارد", "-", "skip", "Skip"} and deadline is None:
-        await message.answer("⚠️ زمان نامعتبر است.", reply_markup=cancel_markup())
+        await message.answer("⚠️ زمان نامعتبر است. از picker استفاده کن یا زمان را با قالب درست بفرست.", reply_markup=cancel_markup())
         return
     await state.update_data(deadline_at=deadline)
     await state.set_state(FormCreateStates.waiting_capacity)
@@ -661,22 +958,16 @@ async def create_question_next(callback: CallbackQuery, state: FSMContext) -> No
         status=FORM_STATUS_OPEN,
     )
     await state.clear()
-    form_row = get_form_by_id(form_id)
-    stats = get_form_statistics(form_id)
-    questions = list_form_questions(form_id)
-    await callback.message.edit_text(form_summary_text(form_row, stats, questions), reply_markup=form_detail_markup(form_id))
+    await _show_form_detail(callback, form_id, callback.bot)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_VIEW))
-async def view_form(callback: CallbackQuery) -> None:
+async def view_form(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
     form_id = int(callback.data.split(":")[1])
     if not await ensure_form_owner(callback, form_id):
         return
-    form_row = get_form_by_id(form_id)
-    questions = list_form_questions(form_id)
-    stats = get_form_statistics(form_id)
-    await callback.message.edit_text(form_summary_text(form_row, stats, questions), reply_markup=form_detail_markup(form_id))
+    await _show_form_detail(callback, form_id, bot)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_JOIN))
@@ -714,6 +1005,19 @@ async def prompt_next_question(message: Message, state: FSMContext) -> None:
     elif question["field_type"] == "checkboxes":
         options = json.loads(question["options_json"] or "[]")
         await message.answer(text, reply_markup=checkbox_markup(qid, options, set()))
+    elif question["field_type"] == "date_time":
+        await state.update_data(
+            date_picker=default_picker_state(
+                target="answer_datetime",
+                label=question["label"],
+                allow_none=not bool(question["is_required"]),
+            )
+        )
+        picker_data = (await state.get_data())["date_picker"]
+        await message.answer(
+            f"{text}\n\n{date_picker_text(picker_data)}",
+            reply_markup=date_picker_markup(picker_data),
+        )
     else:
         await message.answer(text, reply_markup=cancel_markup())
 
@@ -785,7 +1089,12 @@ async def answer_textual_question(message: Message, state: FSMContext) -> None:
         if parsed is None:
             await message.answer("⚠️ قالب تاریخ/زمان نامعتبر است.", reply_markup=cancel_markup())
             return
-        value = format_datetime_fa(parsed)
+        friendly_value = format_datetime_fa(parsed)
+        answers = data.get("answers", {})
+        answers[str(question["id"])] = {"answer_text": friendly_value, "answer_json": [parsed]}
+        await state.update_data(answers=answers, question_index=data["question_index"] + 1)
+        await prompt_next_question(message, state)
+        return
     answers = data.get("answers", {})
     answers[str(question["id"])] = {"answer_text": value, "answer_json": [value]}
     await state.update_data(answers=answers, question_index=data["question_index"] + 1)
@@ -920,10 +1229,7 @@ async def duplicate_form_handler(callback: CallbackQuery) -> None:
         return
     registration = get_active_registration_by_tg_id(callback.from_user.id)
     new_form_id = duplicate_form(form_id, callback.from_user.id, registration["student_number"])
-    form_row = get_form_by_id(new_form_id)
-    stats = get_form_statistics(new_form_id)
-    questions = list_form_questions(new_form_id)
-    await callback.message.edit_text(form_summary_text(form_row, stats, questions), reply_markup=form_detail_markup(new_form_id))
+    await _show_form_detail(callback, new_form_id, callback.bot)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_CLOSE))
@@ -933,10 +1239,7 @@ async def close_form_handler(callback: CallbackQuery) -> None:
         return
     await callback.answer("فرم بسته شد.")
     close_form(form_id)
-    form_row = get_form_by_id(form_id)
-    stats = get_form_statistics(form_id)
-    questions = list_form_questions(form_id)
-    await callback.message.edit_text(form_summary_text(form_row, stats, questions), reply_markup=form_detail_markup(form_id))
+    await _show_form_detail(callback, form_id, callback.bot)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_REOPEN))
@@ -946,10 +1249,7 @@ async def reopen_form_handler(callback: CallbackQuery) -> None:
         return
     await callback.answer("فرم باز شد.")
     reopen_form(form_id)
-    form_row = get_form_by_id(form_id)
-    stats = get_form_statistics(form_id)
-    questions = list_form_questions(form_id)
-    await callback.message.edit_text(form_summary_text(form_row, stats, questions), reply_markup=form_detail_markup(form_id))
+    await _show_form_detail(callback, form_id, callback.bot)
 
 
 @router.callback_query(F.data.startswith(PREFIX_FORM_REMIND))
@@ -961,8 +1261,7 @@ async def remind_non_submitters(callback: CallbackQuery, bot: Bot) -> None:
     form = get_form_by_id(form_id)
     if not form:
         return
-    me = await bot.get_me()
-    link = _build_form_link(me.username, form["share_token"])
+    link = await _build_form_share_link(bot, form["share_token"])
     recipients = list_non_submitters(form_id)
     sent = 0
     for recipient in recipients:
@@ -972,7 +1271,8 @@ async def remind_non_submitters(callback: CallbackQuery, bot: Bot) -> None:
                 (
                     f"⏳ <b>یادآوری ثبت‌نام</b>\n"
                     f"فرم <b>{e(form['title'])}</b> هنوز توسط شما تکمیل نشده است.\n"
-                    f"🔗 {code(link)}"
+                    f"{render_telegram_time(form['deadline_at'], 'مهلت پاسخ‌گویی') if form['deadline_at'] else ''}\n"
+                    f"{f'🔗 {code(link)}' if link else ''}"
                 ),
             )
             sent += 1
@@ -1051,8 +1351,35 @@ async def do_search_submission(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == MENU_REP_SCHEDULES)
 async def list_schedules(callback: CallbackQuery) -> None:
     await callback.answer()
-    rows = list_form_schedules(callback.from_user.id)
-    await callback.message.edit_text(schedule_list_text(rows), reply_markup=rep_panel_markup())
+    await _show_schedule_page(callback, page=1)
+
+
+@router.callback_query(F.data.startswith(PREFIX_SCHEDULE_VIEW))
+async def view_schedule(callback: CallbackQuery) -> None:
+    await callback.answer()
+    schedule_id = int(callback.data[len(PREFIX_SCHEDULE_VIEW):])
+    schedule = get_schedule(schedule_id)
+    if not schedule or schedule["created_by_tg_id"] != callback.from_user.id:
+        await callback.answer("این زمان‌بندی برای شما در دسترس نیست.", show_alert=True)
+        return
+    template_form = get_form_by_id(schedule["template_form_id"])
+    await callback.message.edit_text(
+        schedule_detail_text(schedule, template_form),
+        reply_markup=schedule_detail_markup(schedule_id),
+    )
+
+
+@router.callback_query(F.data.startswith(PREFIX_SCHEDULE_DEACTIVATE))
+async def deactivate_schedule_handler(callback: CallbackQuery) -> None:
+    await callback.answer()
+    schedule_id = int(callback.data[len(PREFIX_SCHEDULE_DEACTIVATE):])
+    schedule = get_schedule(schedule_id)
+    if not schedule or schedule["created_by_tg_id"] != callback.from_user.id:
+        await callback.answer("این زمان‌بندی برای شما در دسترس نیست.", show_alert=True)
+        return
+    deactivate_schedule(schedule_id)
+    await callback.answer("زمان‌بندی غیرفعال شد.")
+    await _show_schedule_page(callback, page=1)
 
 
 @router.callback_query(F.data.startswith(PREFIX_SCHEDULE_FORM))
@@ -1076,25 +1403,37 @@ async def schedule_channel(message: Message, state: FSMContext) -> None:
     channel_id = int(text)
     await state.update_data(channel_id=channel_id)
     await state.set_state(ScheduleStates.waiting_post_at)
-    await message.answer("⏰ زمان انتشار را با قالب `2026/04/30 18:30` بفرست.", reply_markup=cancel_markup())
+    await _begin_date_picker(
+        message,
+        state,
+        target="schedule_post_at",
+        label="زمان انتشار",
+        allow_none=False,
+    )
 
 
 @router.message(ScheduleStates.waiting_post_at)
 async def schedule_post_at(message: Message, state: FSMContext) -> None:
     post_at = _parse_user_datetime(message.text or "")
     if post_at is None:
-        await message.answer("⚠️ زمان انتشار نامعتبر است.", reply_markup=cancel_markup())
+        await message.answer("⚠️ زمان انتشار نامعتبر است. از picker استفاده کن یا زمان معتبر بفرست.", reply_markup=cancel_markup())
         return
     await state.update_data(post_at=post_at)
     await state.set_state(ScheduleStates.waiting_deadline)
-    await message.answer("🕒 مهلت ثبت‌نام فرم منتشرشده را بفرست یا «ندارد».", reply_markup=cancel_markup())
+    await _begin_date_picker(
+        message,
+        state,
+        target="schedule_deadline",
+        label="مهلت ثبت‌نام فرم",
+        allow_none=True,
+    )
 
 
 @router.message(ScheduleStates.waiting_deadline)
 async def schedule_deadline(message: Message, state: FSMContext) -> None:
     deadline = _parse_user_datetime(message.text or "")
     if (message.text or "").strip() not in {"ندارد", "-", "skip", "Skip"} and deadline is None:
-        await message.answer("⚠️ مهلت نامعتبر است.", reply_markup=cancel_markup())
+        await message.answer("⚠️ مهلت نامعتبر است. از picker استفاده کن یا زمان معتبر بفرست.", reply_markup=cancel_markup())
         return
     await state.update_data(registration_deadline_at=deadline)
     await state.set_state(ScheduleStates.waiting_recurring)
@@ -1125,7 +1464,11 @@ async def finish_schedule(
     schedule_job(scheduler, schedule_id, data["post_at"], callback=schedule_runner)
     await state.clear()
     await callback.message.edit_text(
-        f"✅ زمان‌بندی ثبت شد.\n🆔 {code(schedule_id)}\n⏰ {code(format_datetime_fa(data['post_at']))}",
+        (
+            f"✅ <b>زمان‌بندی ثبت شد.</b>\n"
+            f"🆔 شناسه: {code(schedule_id)}\n"
+            f"{render_telegram_time(data['post_at'], 'انتشار اول')}"
+        ),
         reply_markup=rep_panel_markup(),
     )
 
@@ -1137,25 +1480,80 @@ async def menu_admin_panel(callback: CallbackQuery) -> None:
         await callback.message.edit_text("⛔ دسترسی مدیریت نداری.", reply_markup=simple_back_home_markup())
         return
     recent = list_recent_registrations()
-    lines = ["🛠 <b>پنل مدیریت</b>", "", "<b>ثبت‌های اخیر</b>"]
-    for row in recent:
-        lines.append(f"• {e(row['full_name'])} — {code(row['student_number'])}")
-    await callback.message.edit_text("\n".join(lines), reply_markup=admin_panel_markup())
+    total_students = count_registered_students()
+    await callback.message.edit_text(admin_panel_text(recent, total_students), reply_markup=admin_panel_markup())
+
+
+@router.callback_query(F.data == MENU_ADMIN_STUDENTS)
+async def begin_admin_remove(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await _show_admin_students_page(callback, page=1)
 
 
 @router.callback_query(F.data == MENU_ADMIN_REMOVE)
-async def begin_admin_remove(callback: CallbackQuery, state: FSMContext) -> None:
+async def admin_remove_from_list(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await state.clear()
+    await _show_admin_students_page(callback, page=1)
+
+
+@router.callback_query(F.data == MENU_ADMIN_REMOVE_DIRECT)
+async def admin_remove_direct(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await state.set_state(AdminStates.waiting_remove_student)
-    await callback.message.edit_text("🗑 شماره دانشجویی را بفرست تا ثبت فعالش غیرفعال شود.", reply_markup=cancel_markup())
+    await callback.message.edit_text(
+        "🗑 شماره دانشجویی را بفرست تا ثبت فعال همان دانشجو غیرفعال شود.",
+        reply_markup=cancel_markup(),
+    )
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_REMOVE_SELECT))
+async def admin_remove_select(callback: CallbackQuery) -> None:
+    await callback.answer()
+    student_number = callback.data[len(PREFIX_ADMIN_REMOVE_SELECT):]
+    registered = get_registered_student_by_student_number(student_number)
+    if not registered:
+        await callback.answer("ثبت فعالی برای این دانشجو پیدا نشد.", show_alert=True)
+        return
+    await callback.message.edit_text(
+        admin_remove_confirmation_text(registered),
+        reply_markup=admin_remove_confirmation_markup(student_number),
+    )
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_REMOVE_CANCEL))
+async def admin_remove_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer("حذف لغو شد.")
+    await state.clear()
+    await _show_admin_students_page(callback, page=1)
+
+
+@router.callback_query(F.data.startswith(PREFIX_ADMIN_REMOVE_CONFIRM))
+async def admin_remove_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    student_number = callback.data[len(PREFIX_ADMIN_REMOVE_CONFIRM):]
+    removed = deactivate_student(student_number)
+    await state.clear()
+    await callback.message.edit_text(
+        f"✅ تعداد ثبت فعال غیرفعال‌شده: {code(removed)}",
+        reply_markup=admin_panel_markup(),
+    )
 
 
 @router.message(AdminStates.waiting_remove_student, F.text)
 async def admin_remove_student(message: Message, state: FSMContext) -> None:
     student_number = normalize_student_number(message.text or "")
+    registered = get_registered_student_by_student_number(student_number)
+    if not registered:
+        await message.answer("ثبت فعالی برای این شماره دانشجویی پیدا نشد.", reply_markup=cancel_markup())
+        return
     removed = deactivate_student(student_number)
     await state.clear()
-    await message.answer(f"✅ تعداد ثبت فعال غیرفعال‌شده: {code(removed)}", reply_markup=admin_panel_markup())
+    await message.answer(
+        f"✅ تعداد ثبت فعال غیرفعال‌شده: {code(removed)}\n🎓 شماره دانشجویی: {code(student_number)}",
+        reply_markup=admin_panel_markup(),
+    )
 
 
 @router.message()

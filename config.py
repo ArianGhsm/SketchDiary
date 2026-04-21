@@ -18,3 +18,7 @@ MAIN_REP_TELEGRAM_ID = 6230456748
 # Core data paths (kept under a single folder for easy backup/migration)
 DB_PATH = str(DATA_DIR / "students.db")
 DEFAULT_STUDENTS_CSV = str(DATA_DIR / "default_students.csv")
+
+# Optional fallback image used when a student has no Telegram profile photo.
+# Keep runtime assets under data/ to preserve the repository contract.
+DEFAULT_VERIFICATION_PHOTO_PATH = DATA_DIR / "default_verification_photo.png"

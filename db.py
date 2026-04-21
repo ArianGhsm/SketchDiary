@@ -586,6 +586,58 @@ def list_active_registered_users():
         ).fetchall()
 
 
+def get_registered_student_by_student_number(student_number: str):
+    with get_connection() as conn:
+        return conn.execute(
+            """
+            SELECT telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id
+            FROM telegram_students
+            WHERE student_number = ? AND is_active = 1
+            """,
+            (student_number,),
+        ).fetchone()
+
+
+def count_registered_students(query: str | None = None) -> int:
+    sql = "SELECT COUNT(*) AS cnt FROM telegram_students WHERE is_active = 1"
+    params: list = []
+    if query:
+        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ?)"
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    with get_connection() as conn:
+        row = conn.execute(sql, tuple(params)).fetchone()
+    return int(row["cnt"]) if row else 0
+
+
+def list_registered_students(
+    limit: int = 20,
+    offset: int = 0,
+    query: str | None = None,
+    sort_by: str = "approved_at_desc",
+):
+    sort_map = {
+        "approved_at_desc": "approved_at DESC",
+        "approved_at_asc": "approved_at ASC",
+        "student_number": "student_number ASC",
+        "name": "full_name ASC",
+    }
+    sql = """
+        SELECT telegram_user_id, student_number, full_name, username, profile_text, approved_at, approved_by_tg_id
+        FROM telegram_students
+        WHERE is_active = 1
+    """
+    params: list = []
+    if query:
+        sql += " AND (student_number LIKE ? OR full_name LIKE ? OR COALESCE(username, '') LIKE ?)"
+        like = f"%{query}%"
+        params.extend([like, like, like])
+    sql += f" ORDER BY {sort_map.get(sort_by, 'approved_at DESC')} LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
+    with get_connection() as conn:
+        return conn.execute(sql, tuple(params)).fetchall()
+
+
 def list_recent_registrations(limit: int = 10):
     with get_connection() as conn:
         return conn.execute(

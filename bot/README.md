@@ -1,53 +1,122 @@
 # مستندات پوشه `bot`
 
-این پوشه هسته‌ی اجرایی ربات را نگه می‌دارد.
+این پوشه هسته‌ی اجرایی بات را نگه می‌دارد: wiring، handlerها، UI و serviceهای reusable.
 
-## اجزا
+---
 
-### `application.py`
+## نمای کلی
+
+```text
+bot/
+├── application.py
+├── handlers.py
+├── states.py
+├── services/
+└── ui/
+```
+
+---
+
+## `application.py`
+
+مسئول:
 
 - ساخت `Bot`
 - ساخت `Dispatcher`
-- راه‌اندازی scheduler
-- ثبت startup/shutdown hook
+- include کردن router
+- راه‌اندازی `APScheduler`
+- load کردن jobهای ذخیره‌شده
+- ثبت hookهای startup/shutdown
 
-### `handlers.py`
+---
 
-flowهای اصلی:
+## `handlers.py`
 
-- شروع و منوی اصلی
+بزرگ‌ترین فایل اجرایی پروژه و مسئول flowهای اصلی:
+
+- start و home
 - احراز هویت
-- بررسی درخواست‌ها
-- پروفایل
-- کارنامه
+- تایید/رد نماینده
+- پروفایل و کارنامه
 - پنل نماینده
 - ساخت و مدیریت فرم
-- پاسخ‌دهی به فرم
-- export
-- schedule
-- پنل مدیر
+- پاسخ‌گویی به فرم
+- خروجی‌گیری
+- زمان‌بندی
+- پنل مدیریت
+- picker تاریخ/زمان
 
-### `states.py`
+نکته:
 
-تمام stateهای FSM مربوط به data-entry.
+- اگر منطق reusable پیدا کردید، آن را مستقیم داخل handler نگه ندارید
+- helperها باید به `services/` و بخش متن/keyboard به `ui/` منتقل شوند
 
-### `ui/`
+---
 
-- `texts.py`: متن‌های HTML
-- `keyboards.py`: کیبوردهای اینلاین
+## `states.py`
 
-### `services/`
+فقط stateهای مربوط به data-entry و flowهای چندمرحله‌ای در این فایل قرار می‌گیرند.
 
+مثال‌ها:
+
+- احراز هویت
+- ساخت فرم
+- ثبت نمره
+- ساخت schedule
+- عملیات admin
+
+---
+
+## `ui/`
+
+### `texts.py`
+
+- متن‌های HTML
+- لحن فارسی کاربرمحور
+- کارت‌های اطلاعاتی
+- متن picker تاریخ/زمان
+
+### `keyboards.py`
+
+- keyboard factory
+- button semantics با `style`
+- دکمه‌های copy/open
+- pagination
+- picker تاریخ/زمان
+- تایید حذف و flowهای امن
+
+---
+
+## `services/`
+
+serviceها قرار است reusable باشند و از handlerها جدا بمانند.
+
+در وضعیت فعلی:
+
+- `date_picker.py`
 - `datetime_fa.py`
 - `exporters.py`
 - `formatting.py`
 - `localization.py`
+- `media.py`
 - `parsers.py`
 - `policies.py`
 - `scheduler.py`
 
-## قرارداد توسعه
+---
 
-- feature جدید را مستقیما در handler شلوغ نکنید اگر helper مستقل لازم است.
-- متن و کیبورد را از flow جدا نگه دارید.
-- زمان و داده‌ی قابل‌کپی را با helper مرکزی رندر کنید.
+## قرارداد توسعه داخل این پوشه
+
+1. متن و keyboard را از flow جدا نگه دارید.
+2. برای داده‌های قابل‌کپی از helperهای formatting استفاده کنید.
+3. برای زمان از helperهای مرکزی استفاده کنید.
+4. برای picker تاریخ/زمان از component موجود استفاده کنید و دوباره تایپ دستی خام نسازید.
+5. برای عملیات خطرناک از flow تایید نهایی استفاده کنید.
+
+---
+
+## اسناد مرتبط
+
+- [README اصلی](../README.md)
+- [مستندات serviceها](./services/README.md)
+- [مستندات UI](./ui/README.md)
